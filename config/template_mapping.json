@@ -1,0 +1,21 @@
+{
+  "recipient": "B3",
+  "department": "D4",
+  "quotation_date": "D5",
+  "delivery_place": "D6",
+  "payment_terms": "D7",
+  "validity": "D8",
+  "customer_name": "L5",
+  "customer_phone": "L6",
+  "customer_email": "L7",
+  "display_total": "D10",
+  "numeric_total": "I10",
+  "items_start_row": 14,
+  "items_end_row": 23,
+  "item_text_column": 3,
+  "quantity_column": 6,
+  "unit_price_column": 7,
+  "amount_column": 9,
+  "note_column": 12,
+  "total_cell": "G24"
+}

@@ -1,0 +1,9 @@
+{
+  "현수막": ["width_mm", "height_mm", "quantity"],
+  "육교현수막": ["width_mm", "height_mm", "quantity"],
+  "배너": ["width_mm", "height_mm", "quantity"],
+  "친환경배너": ["width_mm", "height_mm", "quantity"],
+  "명함": ["quantity", "paper", "print_sides"],
+  "포스터": ["quantity"],
+  "포맥스,아크릴": ["width_mm", "height_mm", "quantity", "material"]
+}
