@@ -598,11 +598,6 @@ function App() {
     };
   }, [view, search, selectedId]);
 
-  const blocking = useMemo(
-    () => mail?.reviews.filter((issue) => !issue.resolved && issue.severity === "blocking") ?? [],
-    [mail]
-  );
-
   function startPanelResize(
     panel: WorkbenchPanelKey,
     event: ReactPointerEvent<HTMLDivElement>
@@ -1266,7 +1261,7 @@ function App() {
                 />
               )}
 
-              {mail ? <AnalysisPanel mail={mail} blocking={blocking} onAnalyze={() => void runAction(() => api.analyzeMail(mail.id), "AI 분석이 완료되었습니다.")} onSave={(payload) => void runAction(() => api.saveAnalysis(mail.id, payload), "분석 내용을 저장했습니다.")} onResolve={(issue, value) => void runAction(() => api.resolveReview(issue.id, value), "검토 항목을 반영했습니다.")} onCreate={() => setStorageMail(mail)} loading={loading} /> : <EmptySelect />}
+              {mail ? <AnalysisPanel mail={mail} onAnalyze={() => void runAction(() => api.analyzeMail(mail.id), "AI 분석이 완료되었습니다.")} onSave={(payload) => void runAction(() => api.saveAnalysis(mail.id, payload), "분석 내용을 저장했습니다.")} onCreate={(payload) => void runAction(async () => { const updated = await api.saveAnalysis(mail.id, payload); setStorageMail(updated); }, "견적서 저장 위치를 선택해주세요.", false)} loading={loading} /> : <EmptySelect />}
             </section>
 
             <div
@@ -1953,13 +1948,11 @@ function CatalogSpecField({
   );
 }
 
-function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate, loading }: {
+function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
   mail: MailDetail;
-  blocking: ReviewIssue[];
   onAnalyze: () => void;
   onSave: (payload: unknown) => void;
-  onResolve: (issue: ReviewIssue, value: unknown) => void;
-  onCreate: () => void;
+  onCreate: (payload: unknown) => void;
   loading: boolean;
 }) {
   const [form, setForm] = useState<MailDetail>(mail);
@@ -2148,8 +2141,8 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
     patchItem(index, patch);
   }
 
-  function save() {
-    onSave({
+  function analysisPayload() {
+    return {
       customer_organization: form.customer_organization,
       customer_department: form.customer_department,
       customer_name: form.customer_name,
@@ -2163,7 +2156,11 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
       summary: form.summary,
       reason: form.reason,
       items: form.items
-    });
+    };
+  }
+
+  function save() {
+    onSave(analysisPayload());
   }
 
   return (
@@ -2193,10 +2190,6 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
         <div className="analysis-detail-block"><span className="analysis-result-label">판단 근거</span><p className="analysis-result-text">{mail.reason || "판단 근거가 없습니다."}</p></div>
         <div className="analysis-detail-block"><span className="analysis-result-label">누락 정보</span>{mail.missing_information.length > 0 ? <div className="missing-information-list">{mail.missing_information.map((information, index) => <span key={`${information}-${index}`} className="missing-information-chip">{information}</span>)}</div> : <p className="analysis-empty-text">AI가 확인한 누락 정보가 없습니다.</p>}</div>
       </div>
-
-      {mail.reviews.filter((issue) => !issue.resolved).length > 0 && (
-        <div className="review-box"><h3><AlertTriangle size={18} /> {blocking.length > 0 ? "검토 필요" : "참고 사항"} {mail.reviews.filter((issue) => !issue.resolved).length}건</h3>{mail.reviews.filter((issue) => !issue.resolved).map((issue) => <ReviewRow key={issue.id} issue={issue} onResolve={onResolve} />)}</div>
-      )}
 
       <div className="form-section"><h3>고객 정보</h3><div className="form-grid two"><Field label="기관명" value={form.customer_organization} onChange={(value) => setForm({ ...form, customer_organization: value })} /><Field label="담당자" value={form.customer_name} onChange={(value) => setForm({ ...form, customer_name: value })} /><Field label="이메일" value={form.customer_email} onChange={(value) => setForm({ ...form, customer_email: value })} /><Field label="전화번호" value={form.customer_phone} onChange={(value) => setForm({ ...form, customer_phone: value })} /><Field label="납품 장소" value={form.delivery_place} onChange={(value) => setForm({ ...form, delivery_place: value })} /><Field label="희망 일정" value={form.requested_date} onChange={(value) => setForm({ ...form, requested_date: value })} /></div></div>
 
@@ -2338,9 +2331,8 @@ function AnalysisPanel({ mail, blocking, onAnalyze, onSave, onResolve, onCreate,
       </div>
 
       <div className="form-section"><h3>분석 요약</h3><textarea className="summary-input" value={form.summary || ""} onChange={(event) => setForm({ ...form, summary: event.target.value })} /></div>
-      {blocking.length > 0 && <p className="blocking-note">필수 검토 {blocking.length}건을 해결해야 견적서를 생성할 수 있습니다.</p>}
       {missingFields.length > 0 && <p className="blocking-note">견적서 생성 전 필수 항목을 확인해 주세요: {missingFields.join(" / ")}</p>}
-      <div className="action-bar"><button className="button secondary" onClick={save}><Save size={17} /> 수정 저장</button><button className="button primary" disabled={blocking.length > 0 || !form.items.length || missingFields.length > 0} onClick={onCreate}><FileSpreadsheet size={17} /> 견적서 생성</button></div>
+      <div className="action-bar"><button className="button secondary" onClick={save}><Save size={17} /> 수정 저장</button><button className="button primary" disabled={!form.items.length || missingFields.length > 0} onClick={() => onCreate(analysisPayload())}><FileSpreadsheet size={17} /> 견적서 생성</button></div>
       </div>
     </>
   );

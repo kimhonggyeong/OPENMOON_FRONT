@@ -7,7 +7,7 @@ import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import format_datetime, make_msgid
+from email.utils import format_datetime, make_msgid, parseaddr
 from html import escape
 from pathlib import Path
 
@@ -169,8 +169,6 @@ def _validate_customer_pdf_attachment(
 
 def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str, Path]:
     """Validate all local prerequisites before approval changes the draft state."""
-    if not settings.allow_live_send:
-        raise PermissionError("ALLOW_LIVE_SEND=false입니다. 실제 발송 전 테스트를 완료하세요.")
     if not settings.daum_login_id or not settings.daum_app_password:
         raise RuntimeError("메일 계정 정보가 설정되지 않았습니다.")
 
@@ -179,7 +177,25 @@ def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str,
         or draft.mail.original_sender_email
     )
 
-    if settings.send_test_to_self:
+    approval_test_mode = bool(
+        getattr(settings, "approval_test_mode", False)
+    )
+
+    if approval_test_mode:
+        recipient = str(
+            getattr(settings, "approval_test_recipient", "")
+        ).strip()
+        _, parsed_recipient = parseaddr(recipient)
+        if not recipient or parsed_recipient != recipient or "@" not in parsed_recipient:
+            raise ValueError(
+                "APPROVAL_TEST_MODE=true일 때 유효한 "
+                "APPROVAL_TEST_RECIPIENT를 설정해야 합니다."
+            )
+    elif not settings.allow_live_send:
+        raise PermissionError(
+            "ALLOW_LIVE_SEND=false입니다. 실제 발송 전 테스트를 완료하세요."
+        )
+    elif bool(getattr(settings, "send_test_to_self", False)):
         recipient = _sender_address(settings.daum_login_id)
     else:
         recipient = customer_recipient
@@ -258,7 +274,11 @@ def send_draft(
     )
 
     # 전달 메일의 Message-ID는 전달자와의 바깥 스레드이므로 직접 수신 메일에만 연결한다.
-    if draft.mail.forward_depth == 0 and draft.mail.message_id:
+    if (
+        not bool(getattr(settings, "approval_test_mode", False))
+        and draft.mail.forward_depth == 0
+        and draft.mail.message_id
+    ):
         message["In-Reply-To"] = draft.mail.message_id
         references = (draft.mail.references or "").strip()
         message["References"] = f"{references} {draft.mail.message_id}".strip()

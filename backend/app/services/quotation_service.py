@@ -20,14 +20,15 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
+from openpyxl.styles import Border, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries, column_index_from_string
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import PROJECT_ROOT, Settings
-from ..enums import DraftStatus, MailStatus, Severity
-from ..models import Mail, QuotationDraft, QuotationDraftItem, ReviewIssue
+from ..enums import DraftStatus, MailStatus
+from ..models import Mail, QuotationDraft, QuotationDraftItem
 from .price_engine_adapter import calculate_item_price
 from .quote_math import validate_quote_items
 from .utils import sanitize_filename
@@ -36,6 +37,9 @@ StorageMode = Literal["existing", "department", "person", "separate"]
 MAIL_MARKER_PREFIX = "OPENMOON_MAIL_ID:"
 ITEM_START_ROW = 14
 ITEM_END_ROW = 23
+COST_COLUMN = 12
+MARGIN_COLUMN = 13
+SCHEDULE_COLUMN = 14
 
 EXCEL_COM_SCRIPT = r'''
 param([string]$TargetPath, [string]$TemplatePath, [string]$TemplateSheet, [string]$PayloadPath)
@@ -113,7 +117,7 @@ try {
     }
 
     for ($row = 14; $row -le 23; $row++) {
-        foreach ($column in @(2, 3, 6, 7, 9, 12, 20)) {
+        foreach ($column in @(2, 3, 6, 7, 9, 12, 13, 14, 20)) {
             $range = $sheet.Cells.Item($row, $column)
             if ($range.MergeCells) {
                 # Excel refuses ClearContents on only one cell of a merged
@@ -123,6 +127,22 @@ try {
             }
             else { $range.ClearContents() }
         }
+        # 수량(F) 또는 단가(G)를 수정하면 공급금액(I)이 자동 계산된다.
+        $sheet.Cells.Item($row, 9).Formula = ('=IF(OR(F{0}="",G{0}=""),"",F{0}*G{0})' -f $row)
+    }
+
+    # 공급금액 오른쪽에 내부 관리용 제작원가, 마진, 일정을 표시한다.
+    $sheet.Range("L13:N13").ClearFormats()
+    $sheet.Range("L13").Value2 = "제작 원가"
+    $sheet.Range("M13").Value2 = "마진"
+    $sheet.Range("N13").Value2 = "일정"
+    $sheet.Range("L13:N13").Font.Bold = $true
+    $sheet.Range("L13:N13").HorizontalAlignment = -4108
+    $sheet.Columns.Item(12).ColumnWidth = 14
+    $sheet.Columns.Item(13).ColumnWidth = 14
+    $sheet.Columns.Item(14).ColumnWidth = 32
+    for ($row = 14; $row -le 23; $row++) {
+        $sheet.Cells.Item($row, 13).Formula = ('=IF(OR(I{0}="",L{0}=""),"",I{0}-L{0})' -f $row)
     }
 
     foreach ($item in @($payload.items)) {
@@ -143,17 +163,28 @@ try {
         }
         Set-ExcelValue ($sheet.Cells.Item($row, 6)) $item.quantity
         Set-ExcelValue ($sheet.Cells.Item($row, 7)) $item.unit_price
-        Set-ExcelValue ($sheet.Cells.Item($row, 9)) $item.amount
-        Set-ExcelValue ($sheet.Cells.Item($row, 12)) $item.note
-        Set-ExcelValue ($sheet.Cells.Item($row, 20)) $item.cost_price
+        $costRange = $sheet.Cells.Item($row, 12)
+        $costRange.NumberFormat = $sheet.Cells.Item($row, 9).NumberFormat
+        $costRange.HorizontalAlignment = -4152
+        Set-ExcelValue $costRange $item.cost_price
+        $marginRange = $sheet.Cells.Item($row, 13)
+        $marginRange.NumberFormat = $sheet.Cells.Item($row, 9).NumberFormat
+        $marginRange.HorizontalAlignment = -4152
+        $scheduleRange = $sheet.Cells.Item($row, 14)
+        $scheduleRange.WrapText = $true
+        $scheduleRange.HorizontalAlignment = -4131
+        Set-ExcelValue $scheduleRange $item.note
     }
 
-    # T열은 제작원가 및 내부 식별정보 전용이며 고객 화면에서는 숨긴다.
+    # T열은 내부 메일 식별정보 전용이며 화면에서는 숨긴다.
     $sheet.Columns.Item(20).Hidden = $true
 
     $markerCell = $sheet.Cells.Item(1, 20)
     Set-ExcelValue $markerCell $payload.marker
     $markerCell.EntireColumn.Hidden = $true
+    $sheet.Range("G24").Formula = "=SUM(I14:I23)"
+    $sheet.Range("D10").Formula = "=G24"
+    $sheet.Range("I10").Formula = "=G24"
     $targetBook.Save()
 }
 finally {
@@ -339,21 +370,19 @@ try {
         }
     }
 
+    # 제작원가(L), 마진(M), 일정(N)은 내부 Excel에서만 사용하며 고객 PDF에서는 제거한다.
+    $sheet.Columns.Item(12).ClearContents()
+    $sheet.Columns.Item(13).ClearContents()
+    $sheet.Columns.Item(14).ClearContents()
+    $sheet.Columns.Item(12).Hidden = $true
+    $sheet.Columns.Item(13).Hidden = $true
+    $sheet.Columns.Item(14).Hidden = $true
     $sheet.Columns.Item(20).ClearContents()
     $sheet.Columns.Item(20).Hidden = $true
 
     # 고객용 PDF의 품목명은 내부 분석명이 아니라 대표 품목명으로 표시한다.
-    if (
-        -not [string]::IsNullOrWhiteSpace($PayloadPath)
-        -and (Test-Path -LiteralPath $PayloadPath)
-    ) {
-        $payload = (
-            Get-Content
-                -LiteralPath $PayloadPath
-                -Raw
-                -Encoding UTF8
-            | ConvertFrom-Json
-        )
+    if ((-not [string]::IsNullOrWhiteSpace($PayloadPath)) -and (Test-Path -LiteralPath $PayloadPath)) {
+        $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
         foreach ($item in @($payload.items)) {
             $row = [int]$item.row
@@ -378,10 +407,7 @@ try {
             $current = [string]$range.Value2
             $detail = ""
 
-            if (
-                -not [string]::IsNullOrWhiteSpace($current)
-                -and $current.Contains("`n")
-            ) {
+            if ((-not [string]::IsNullOrWhiteSpace($current)) -and $current.Contains("`n")) {
                 $parts = $current -split "`n", 2
 
                 if ($parts.Count -gt 1) {
@@ -391,9 +417,7 @@ try {
 
             $newText = $product
 
-            if (
-                -not [string]::IsNullOrWhiteSpace($detail)
-            ) {
+            if (-not [string]::IsNullOrWhiteSpace($detail)) {
                 $newText += "`n" + $detail
             }
 
@@ -2273,18 +2297,6 @@ def _validate_target(
     return target, target.exists()
 
 
-def _ensure_no_blocking_reviews(session: Session, mail: Mail) -> None:
-    blocking = session.scalar(
-        select(ReviewIssue.id).where(
-            ReviewIssue.mail_id == mail.id,
-            ReviewIssue.resolved.is_(False),
-            ReviewIssue.severity == Severity.BLOCKING,
-        )
-    )
-    if blocking:
-        raise ValueError("검토가 필요한 필수 항목이 남아 있어 견적서를 생성할 수 없습니다.")
-
-
 def _resolve_item_price(settings: Settings, mail: Mail, item: Any) -> tuple[int | None, int | None, dict[str, Any]]:
     if item.unit_price is not None:
         unit_price = int(item.unit_price)
@@ -2400,7 +2412,7 @@ def _set_value(sheet, coordinate: str, value: Any) -> None:
 
 def _clear_item_area(sheet) -> None:
     for row in range(ITEM_START_ROW, ITEM_END_ROW + 1):
-        for column in (2, 3, 6, 7, 9, 12, 20):
+        for column in (2, 3, 6, 7, 9, COST_COLUMN, MARGIN_COLUMN, SCHEDULE_COLUMN, 20):
             cell = sheet.cell(row, column)
             if isinstance(cell, MergedCell):
                 continue
@@ -2506,6 +2518,33 @@ def _populate_sheet(sheet, settings: Settings, mail: Mail, selected: list[Quotat
     _set_value(sheet, "L6", mail.customer_phone or "")
     _set_value(sheet, "L7", mail.customer_email or mail.original_sender_email or "")
     _clear_item_area(sheet)
+    # 내부 관리 열은 공급금액 바로 오른쪽에 배치한다.
+    for column, title in (
+        (COST_COLUMN, "제작 원가"),
+        (MARGIN_COLUMN, "마진"),
+        (SCHEDULE_COLUMN, "일정"),
+    ):
+        header = _merged_anchor(sheet, 13, column)
+        header.fill = PatternFill(fill_type=None)
+        header.border = Border()
+        header_font = copy.copy(header.font)
+        header_font.bold = True
+        header.font = header_font
+        header_alignment = copy.copy(header.alignment)
+        header_alignment.horizontal = "center"
+        header_alignment.vertical = "center"
+        header.alignment = header_alignment
+        header.value = title
+    sheet.column_dimensions["L"].width = 14
+    sheet.column_dimensions["M"].width = 14
+    sheet.column_dimensions["N"].width = 32
+    for row in range(ITEM_START_ROW, ITEM_END_ROW + 1):
+        _merged_anchor(sheet, row, 9).value = (
+            f'=IF(OR(F{row}="",G{row}=""),"",F{row}*G{row})'
+        )
+        _merged_anchor(sheet, row, MARGIN_COLUMN).value = (
+            f'=IF(OR(I{row}="",L{row}=""),"",I{row}-L{row})'
+        )
     for row, (draft_item, mail_item) in enumerate(zip(selected, mail.items), start=ITEM_START_ROW):
         if row > ITEM_END_ROW:
             break
@@ -2514,18 +2553,25 @@ def _populate_sheet(sheet, settings: Settings, mail: Mail, selected: list[Quotat
         item_cell.value = _rich_item_text(mail_item, item_cell.font.name)
         _merged_anchor(sheet, row, 6).value = draft_item.quantity
         _merged_anchor(sheet, row, 7).value = draft_item.unit_price
-        _merged_anchor(sheet, row, 9).value = draft_item.amount
-        _merged_anchor(sheet, row, 12).value = draft_item.note
-
-        # 제작 원가는 내부 관리용 숨김 열(T)에만 기록한다.
-        _merged_anchor(sheet, row, 20).value = draft_item.cost_price
+        cost_cell = _merged_anchor(sheet, row, COST_COLUMN)
+        cost_cell._style = copy.copy(_merged_anchor(sheet, row, 9)._style)
+        cost_cell.value = draft_item.cost_price
+        margin_cell = _merged_anchor(sheet, row, MARGIN_COLUMN)
+        margin_cell._style = copy.copy(_merged_anchor(sheet, row, 9)._style)
+        margin_cell.value = f'=IF(OR(I{row}="",L{row}=""),"",I{row}-L{row})'
+        schedule_cell = _merged_anchor(sheet, row, SCHEDULE_COLUMN)
+        schedule_alignment = copy.copy(schedule_cell.alignment)
+        schedule_alignment.horizontal = "left"
+        schedule_alignment.vertical = "center"
+        schedule_alignment.wrap_text = True
+        schedule_cell.alignment = schedule_alignment
+        schedule_cell.value = draft_item.note
 
     sheet.column_dimensions["T"].hidden = True
 
-    value = total if complete else ""
-    _set_value(sheet, "G24", value)
-    _set_value(sheet, "D10", value)
-    _set_value(sheet, "I10", value)
+    _set_value(sheet, "G24", "=SUM(I14:I23)")
+    _set_value(sheet, "D10", "=G24")
+    _set_value(sheet, "I10", "=G24")
 
 
 def _backup_path(path: Path, now: datetime) -> Path:
@@ -2567,7 +2613,6 @@ def _save_with_native_excel(
     token = uuid.uuid4().hex
     script_path = temp_path.with_name(f".{temp_path.stem}.{token}.excel-save.ps1")
     payload_path = temp_path.with_name(f".{temp_path.stem}.{token}.excel-save.json")
-    value: int | str = total if complete else ""
     payload = {
         "marker": f"{MAIL_MARKER_PREFIX}{mail.id}",
         "base_name": _sheet_base_name(mail, now),
@@ -2581,9 +2626,6 @@ def _save_with_native_excel(
             "L5": mail.customer_name or "",
             "L6": mail.customer_phone or "",
             "L7": mail.customer_email or mail.original_sender_email or "",
-            "G24": value,
-            "D10": value,
-            "I10": value,
         },
         "items": [
             {
@@ -2666,7 +2708,6 @@ def create_quotation(
     now: datetime | None = None,
 ) -> QuotationDraft:
     now = now or datetime.now()
-    _ensure_no_blocking_reviews(session, mail)
     if mail.analysis_payload.get("is_order_related") is False:
         raise ValueError("견적 업무와 관련된 메일만 견적서를 생성할 수 있습니다.")
     validation_errors = validate_quote_items(list(mail.items))
@@ -2734,7 +2775,12 @@ def create_quotation(
                 cost_price=item.cost_price,
                 unit_price=unit_price,
                 amount=amount,
-                note=item.schedule_note,
+                # 품목별 일정이 있으면 우선하고, 없으면 분석 화면의
+                # 메일 전체 '희망 일정'을 모든 품목에 공통 적용한다.
+                note=(
+                    item.schedule_note
+                    or mail.requested_date
+                ),
                 price_source=source,
             )
             session.add(record)

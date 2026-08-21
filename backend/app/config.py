@@ -68,6 +68,11 @@ class Settings(BaseSettings):
 
     allow_live_send: bool = False
 
+    # 승인 버튼의 전체 발송 흐름을 실제 고객 대신 지정 주소로 검증한다.
+    # 이 모드에서는 ALLOW_LIVE_SEND=false여도 지정된 테스트 주소로만 발송한다.
+    approval_test_mode: bool = False
+    approval_test_recipient: str = ""
+
     # 테스트 중에는 실제 고객 대신 현재 로그인한 Daum 계정 자신에게 발송
     send_test_to_self: bool = True
 

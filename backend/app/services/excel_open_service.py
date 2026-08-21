@@ -12,6 +12,35 @@ def _ps_quote(value: str) -> str:
     return value.replace("'", "''")
 
 
+def resolve_quotation_source_path(
+    file_path: Path | str,
+    quotation_files_root: Path | str,
+) -> Path:
+    """Resolve stale history paths against the configured quotation folder."""
+    original = Path(file_path).expanduser()
+    if original.exists() and original.is_file():
+        return original.resolve()
+
+    root = Path(quotation_files_root).expanduser().resolve()
+    direct = root / original.name
+    if direct.exists() and direct.is_file():
+        return direct.resolve()
+
+    if root.exists() and root.is_dir():
+        matches = [path for path in root.rglob(original.name) if path.is_file()]
+        if len(matches) == 1:
+            return matches[0].resolve()
+        if len(matches) > 1:
+            raise FileNotFoundError(
+                f"동일한 이름의 견적 Excel이 여러 개 있어 선택할 수 없습니다: {original.name}"
+            )
+
+    raise FileNotFoundError(
+        f"Excel 파일을 찾을 수 없습니다: {original.resolve()}\n"
+        f"quotation_files에서도 검색했습니다: {root}"
+    )
+
+
 def _open_in_file_explorer(path: Path) -> dict[str, Any]:
     subprocess.Popen(
         ["explorer.exe", f'/select,"{path}"'],

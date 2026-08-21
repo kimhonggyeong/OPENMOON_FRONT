@@ -23,7 +23,10 @@ from ..models import (
     ReviewIssue,
 )
 from .attachment_service import IMAGE_EXTENSIONS, _sniff_image_format
-from .excel_open_service import open_excel_location
+from .excel_open_service import (
+    open_excel_location,
+    resolve_quotation_source_path,
+)
 from .history_service import (
     get_external_history_candidates,
     is_known_external_history_source,
@@ -747,7 +750,11 @@ def _open_quotation_source(
         ) is not None
     if not known:
         raise PermissionError("검색된 과거 견적 DB에 등록된 파일만 열 수 있습니다.")
-    return open_excel_location(source_file, sheet=source_sheet)
+    resolved_source = resolve_quotation_source_path(
+        source_file,
+        ctx.settings.quotation_files_path,
+    )
+    return open_excel_location(resolved_source, sheet=source_sheet)
 
 
 def _find_item(ctx: AgentToolContext, *, item_position: int | None, product_name: str | None) -> MailItem:

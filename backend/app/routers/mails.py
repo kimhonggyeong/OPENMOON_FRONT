@@ -40,7 +40,10 @@ from ..services.history_service import (
     get_history_candidates,
     is_known_external_history_source,
 )
-from ..services.excel_open_service import open_excel_location
+from ..services.excel_open_service import (
+    open_excel_location,
+    resolve_quotation_source_path,
+)
 from ..services.llm_service import analyze_mail
 from ..services.mail_service import (
     import_eml_bytes,
@@ -86,8 +89,12 @@ def open_history_source(
     if not known:
         raise HTTPException(403, "등록된 과거 견적 파일만 열 수 있습니다.")
     try:
-        return open_excel_location(
+        source_path = resolve_quotation_source_path(
             request.source_file,
+            settings.quotation_files_path,
+        )
+        return open_excel_location(
+            source_path,
             sheet=request.source_sheet,
         )
     except FileNotFoundError as error:
