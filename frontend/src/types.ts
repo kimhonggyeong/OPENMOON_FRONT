@@ -71,6 +71,8 @@ export interface MailListItem {
   id: number;
   status: MailStatus;
   starred: boolean;
+  hearted: boolean;
+  heart_key: string;
   outer_subject?: string | null;
   original_subject?: string | null;
   original_sender_name?: string | null;

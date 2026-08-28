@@ -12,6 +12,7 @@ from ..models import Mail, MailItem, ReviewIssue
 from .history_service import get_history_candidates
 from .price_engine_adapter import calculate_item_price
 from .quantity_suggestion_service import suggest_quantity_from_history
+from .quote_math import missing_catalog_fields
 
 # 품목별 세부사양의 기준 데이터는 config/product_catalog.json이다.
 # 여기서는 공통 규격 필수값을 별도로 강제하지 않는다.
@@ -99,7 +100,6 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
             mail.id,
             "LOW_ANALYSIS_CONFIDENCE",
             f"메일 분석 신뢰도가 {mail.confidence:.2f}로 기준보다 낮습니다.",
-            severity=Severity.WARNING,
         )
 
     if not mail.items:
@@ -108,10 +108,22 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
     for item in mail.items:
         product = item.normalized_product or item.product_name
 
-        # 품목별 사양(규격, 용지, 재질, 후가공 등)은 product_catalog 기준이며
+        # 품목별 사양(규격, 용지, 재질 등)은 product_catalog 기준이며
         # 여기서 공통 필수값으로 차단하지 않는다.
-        # 다만 수량과 가격은 실제 견적 금액 산출/확정에 필요한 운영 조건이므로
-        # 기존 검토 필요 흐름을 유지한다.
+        # 다만 마감처리·시공여부는 시공비·납품 방식 등 가격/일정 결정에
+        # 직결되므로, 카탈로그에 해당 품목의 필드가 정의돼 있는데
+        # 값이 비어있으면 검토 필요로 차단한다.
+        for field in missing_catalog_fields(
+            item, keys={"finishing", "installation_delivery"}
+        ):
+            label = str(field.get("label") or field.get("key") or "사양")
+            _add_issue(
+                session,
+                mail.id,
+                "MISSING_ITEM_SPEC",
+                f"{product}의 {label} 정보가 없습니다.",
+                f"items.{item.id}.spec_attributes.{field.get('key')}",
+            )
 
         # 견적 금액 계산에 반드시 필요한 수량은 담당자가 확인하도록 한다.
         if item.quantity in (None, ""):
@@ -172,7 +184,6 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
                 "PRICE_REVIEW_REQUIRED",
                 f"{product}의 가격 {decision.unit_price:,}원은 검토가 필요한 후보입니다.",
                 f"items.{item.id}.unit_price",
-                severity=Severity.WARNING,
                 suggestions=[asdict(decision)],
             )
 
@@ -188,7 +199,6 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
                 "ATTACHMENT_REVIEW_REQUIRED",
                 f"첨부파일 '{attachment.filename}'의 자동 분석이 완료되지 않았습니다.",
                 f"attachments.{attachment.id}",
-                severity=Severity.WARNING,
             )
 
     reference_words = ("지난번", "저번", "작년", "이전처럼", "전에 했던", "그때처럼")
@@ -202,7 +212,6 @@ def evaluate_mail_readiness(session: Session, settings: Settings, mail: Mail) ->
                 "UNRESOLVED_HISTORY_REFERENCE",
                 "이전 제작물을 가리키는 표현이 있지만 연결할 고객 견적 이력을 찾지 못했습니다.",
                 "history_reference",
-                severity=Severity.WARNING,
             )
 
     # AI의 missing_information은 분석 결과 영역에 이미 표시된다.

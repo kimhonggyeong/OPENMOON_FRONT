@@ -17,20 +17,24 @@ except ImportError:  # pragma: no cover
 from ..config import Settings
 
 
+def _provider(settings: Settings) -> str:
+    return str(getattr(settings, "llm_provider", "openai")).strip().lower() or "openai"
+
+
 def provider_label(settings: Settings) -> str:
-    return "Claude" if settings.llm_provider == "anthropic" else "OpenAI"
+    return "Claude" if _provider(settings) == "anthropic" else "OpenAI"
 
 
 def is_ai_configured(settings: Settings) -> bool:
-    if settings.llm_provider == "anthropic":
-        return bool(settings.anthropic_api_key and Anthropic is not None)
-    return bool(settings.openai_api_key and OpenAI is not None)
+    if _provider(settings) == "anthropic":
+        return bool(getattr(settings, "anthropic_api_key", "") and Anthropic is not None)
+    return bool(getattr(settings, "openai_api_key", "") and OpenAI is not None)
 
 
 def require_ai_configured(settings: Settings) -> None:
     if is_ai_configured(settings):
         return
-    if settings.llm_provider == "anthropic":
+    if _provider(settings) == "anthropic":
         if Anthropic is None:
             raise RuntimeError("anthropic 패키지가 설치되지 않았습니다. pip install -r requirements.txt를 실행하세요.")
         raise RuntimeError("ANTHROPIC_API_KEY가 없어 Claude를 사용할 수 없습니다.")
@@ -40,19 +44,21 @@ def require_ai_configured(settings: Settings) -> None:
 
 
 def active_model(settings: Settings) -> str:
-    return settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
+    if _provider(settings) == "anthropic":
+        return str(getattr(settings, "anthropic_model", "claude-haiku-4-5"))
+    return str(getattr(settings, "openai_model", "gpt-5.6-luna"))
 
 
 def create_openai_client(settings: Settings):
     require_ai_configured(settings)
-    if settings.llm_provider != "openai" or OpenAI is None:
+    if _provider(settings) != "openai" or OpenAI is None:
         raise RuntimeError("현재 AI 공급자가 OpenAI가 아닙니다.")
     return OpenAI(api_key=settings.openai_api_key)
 
 
 def create_anthropic_client(settings: Settings):
     require_ai_configured(settings)
-    if settings.llm_provider != "anthropic" or Anthropic is None:
+    if _provider(settings) != "anthropic" or Anthropic is None:
         raise RuntimeError("현재 AI 공급자가 Anthropic이 아닙니다.")
     return Anthropic(api_key=settings.anthropic_api_key)
 
@@ -73,7 +79,7 @@ def generate_text(
     max_tokens: int | None = None,
 ) -> str:
     require_ai_configured(settings)
-    if settings.llm_provider == "anthropic":
+    if _provider(settings) == "anthropic":
         client = create_anthropic_client(settings)
         response = client.messages.create(
             model=settings.anthropic_model,
@@ -119,7 +125,7 @@ def generate_vision_text(
     max_tokens: int | None = None,
 ) -> str:
     require_ai_configured(settings)
-    if settings.llm_provider == "anthropic":
+    if _provider(settings) == "anthropic":
         client = create_anthropic_client(settings)
         response = client.messages.create(
             model=settings.anthropic_model,

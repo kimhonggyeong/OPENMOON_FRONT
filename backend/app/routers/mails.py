@@ -103,6 +103,42 @@ def open_history_source(
         raise HTTPException(400, f"과거 견적 Excel 열기 실패: {error}") from error
 
 
+@router.post("/history/source-file")
+def download_history_source(
+    request: OpenHistorySourceRequest,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Send a registered history workbook to a LAN guest for local viewing."""
+    known = is_known_external_history_source(
+        settings.quotation_database_path,
+        request.source_file,
+        request.source_sheet,
+    )
+    if not known:
+        known = session.scalar(
+            select(QuotationHistory.id).where(
+                QuotationHistory.source_file == request.source_file,
+                QuotationHistory.source_sheet == request.source_sheet,
+            )
+        ) is not None
+    if not known:
+        raise HTTPException(403, "등록된 과거 견적 파일만 내려받을 수 있습니다.")
+    try:
+        source_path = resolve_quotation_source_path(
+            request.source_file,
+            settings.quotation_files_path,
+        )
+        return FileResponse(
+            source_path,
+            filename=source_path.name,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"X-Openmoon-Suffix": source_path.suffix.lower()},
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
+
+
 # =========================================================
 # 공통 메일 상세 조회 쿼리
 # =========================================================

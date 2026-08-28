@@ -9,8 +9,26 @@ body { margin: 0; min-width: 1200px; min-height: 100vh; background: #f2f0ea; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 a { color: inherit; text-decoration: none; }
-.app-shell { display: flex; min-height: 100vh; }
-.sidebar { width: 228px; background: #252b31; color: #fff; padding: 24px 16px; display: flex; flex-direction: column; position: fixed; inset: 0 auto 0 0; z-index: 20; }
+.app-shell { display:flex; min-height:100vh; --sidebar-width:228px; }
+.app-shell.sidebar-is-collapsed { --sidebar-width:68px; }
+.sidebar {
+  width:var(--sidebar-width);
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+  display:flex;
+  flex-direction:column;
+  padding:18px 12px;
+  background:#252b31;
+  transition:width .22s ease, padding .22s ease;
+  overflow:visible;
+}
+.sidebar.collapsed { padding:18px 8px; box-shadow:5px 0 18px rgba(20,25,29,.12); }
+.sidebar.collapsed:hover { width:228px; padding:18px 12px; }
+.main-area { margin-left:var(--sidebar-width); width:calc(100% - var(--sidebar-width)); min-width:0; transition:margin-left .22s ease, width .22s ease; }
+.sidebar.collapsed:hover + .main-area { margin-left:228px; width:calc(100% - 228px); }
 .brand { padding: 0 8px 22px; border-bottom: 1px solid rgba(255,255,255,.1); }
 .brand-logo { display:block; width:100%; height:auto; max-height:112px; object-fit:contain; padding:8px 10px; border-radius:10px; background:#fff; }
 .sidebar nav { padding-top: 22px; display: grid; gap: 7px; }
@@ -19,7 +37,20 @@ a { color: inherit; text-decoration: none; }
 .nav-item.active { background:#fff; color:#252b31; font-weight:700; }
 .nav-count { margin-left:auto; background:#e87535; color:#fff; border-radius:12px; min-width:22px; padding:2px 6px; text-align:center; font-size:11px; }
 .sidebar-note { margin-top:auto; color:#aeb6bd; background:rgba(255,255,255,.055); border-radius:10px; padding:13px; font-size:11px; line-height:1.55; display:flex; gap:9px; align-items:flex-start; }
-.main-area { margin-left:228px; width:calc(100% - 228px); min-height:100vh; }
+.sidebar.collapsed .brand { height:48px; padding:0 0 15px; }
+.sidebar.collapsed .brand-logo { opacity:0; pointer-events:none; }
+.sidebar.collapsed nav { padding-top:18px; }
+.sidebar.collapsed .nav-item { justify-content:center; width:52px; height:48px; padding:0; gap:0; }
+.sidebar.collapsed .nav-item span { display:none; }
+.sidebar.collapsed .nav-count { position:absolute; margin:0; transform:translate(15px,-14px); min-width:17px; padding:1px 4px; font-size:9px; }
+.sidebar.collapsed .sidebar-note { display:none; }
+.sidebar.collapsed:hover .brand { height:auto; padding:0 8px 22px; }
+.sidebar.collapsed:hover .brand-logo { opacity:1; pointer-events:auto; }
+.sidebar.collapsed:hover nav { padding-top:22px; }
+.sidebar.collapsed:hover .nav-item { justify-content:flex-start; width:auto; height:auto; padding:13px 14px; gap:12px; }
+.sidebar.collapsed:hover .nav-item span { display:inline; }
+.sidebar.collapsed:hover .nav-count { position:static; margin-left:auto; transform:none; min-width:22px; padding:2px 6px; font-size:11px; }
+.sidebar.collapsed:hover .sidebar-note { display:flex; }
 .topbar { height:94px; display:flex; justify-content:space-between; align-items:center; padding:0 28px; background:#faf9f5; border-bottom:1px solid #ddd9d0; }
 .topbar h1 { margin:0 0 5px; font-size:23px; }
 .topbar p { margin:0; color:#777; font-size:12px; }
@@ -82,6 +113,9 @@ a { color: inherit; text-decoration: none; }
 .mail-star { border:0; background:transparent; color:#aaa59d; width:22px; height:22px; padding:0; display:grid; place-items:center; border-radius:50%; flex:0 0 auto; }
 .mail-star:hover { color:#d89a24; background:#fff3d6; }
 .mail-star.starred { color:#e0a11d; }
+.mail-heart { border:0; background:transparent; color:#aaa59d; width:22px; height:22px; padding:0; display:grid; place-items:center; border-radius:50%; flex:0 0 auto; }
+.mail-heart:hover { color:#ef4f85; background:#ffe8f0; }
+.mail-heart.hearted { color:#ef3f79; }
 .mail-loading { color:#d96d31; flex:0 0 auto; }
 .mail-card time { color:#96918a; font-size:10px; }
 .mail-card strong { display:block; font-size:12px; line-height:1.4; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
@@ -415,8 +449,12 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
   background: rgba(25, 29, 33, .58);
 }
 .product-picker-modal {
-  width: min(760px, 92vw);
-  max-height: min(760px, 88vh);
+  width: 760px;
+  height: 680px;
+  min-width: 760px;
+  max-width: 760px;
+  min-height: 680px;
+  max-height: 680px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -473,7 +511,8 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
   color: #b65320;
 }
 .product-picker-list {
-  min-height: 260px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   border-top: 1px solid #eee9e1;
   border-bottom: 1px solid #eee9e1;
@@ -659,6 +698,51 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
   gap: 10px;
   margin-bottom: 4px;
 }
+.item-number-wrap {
+  display:inline-flex;
+  align-items:center;
+  height:30px;
+  overflow:hidden;
+  border:1px solid #ded8cf;
+  border-radius:8px;
+  background:#fff;
+  box-shadow:0 1px 2px rgba(53,45,37,.04);
+  transition:border-color .16s ease, box-shadow .16s ease;
+}
+.item-number-wrap:focus-within {
+  border-color:#d96d31;
+  box-shadow:0 0 0 2px rgba(217,109,49,.09);
+}
+.item-drag-handle {
+  width:29px;
+  height:100%;
+  display:grid;
+  place-items:center;
+  flex:none;
+  color:#aa795b;
+  background:#fff6ee;
+  border-right:1px solid #eadfd5;
+  cursor:grab;
+  user-select:none;
+}
+.item-drag-handle:hover { color:#d0642d; background:#ffefe2; }
+.item-drag-handle:active { cursor:grabbing; }
+.item-order-input {
+  width:38px;
+  height:100%;
+  padding:0 5px;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:#3f4449;
+  font-size:11px;
+  font-weight:800;
+  text-align:center;
+  appearance:textfield;
+  -moz-appearance:textfield;
+}
+.item-order-input::-webkit-inner-spin-button,
+.item-order-input::-webkit-outer-spin-button { margin:0; appearance:none; -webkit-appearance:none; }
 .item-delete-button {
   display: inline-flex;
   align-items: center;

@@ -19,9 +19,33 @@ def runtime_root() -> Path:
     return PROJECT_ROOT
 
 
+def runtime_data_path(value: str | Path) -> Path:
+    """Resolve business data beside the EXE instead of inside PyInstaller."""
+    path = Path(value).expanduser()
+
+    if not getattr(sys, "frozen", False):
+        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+    # Old .env files can contain an absolute path from the PC that built the
+    # program. Keep only the portable `backend/...` portion in that case.
+    parts = list(path.parts)
+    backend_index = next(
+        (index for index, part in enumerate(parts) if part.lower() == "backend"),
+        None,
+    )
+    if backend_index is not None:
+        return (runtime_root().joinpath(*parts[backend_index:])).resolve()
+
+    if path.is_absolute():
+        return (runtime_root() / "backend" / "data" / path.name).resolve()
+
+    return (runtime_root() / path).resolve()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        # Source mode: project root, EXE mode: the folder containing the EXE.
+        env_file=runtime_root() / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -177,20 +201,12 @@ class Settings(BaseSettings):
         cls,
         value: str | Path,
     ) -> Path:
-        path = Path(value)
-
-        if path.is_absolute():
-            return path
-
-        return PROJECT_ROOT / path
+        return runtime_data_path(value)
 
     @field_validator("quotation_files_path", mode="before")
     @classmethod
     def resolve_quotation_files_path(cls, value: str | Path) -> Path:
-        path = Path(value)
-        if path.is_absolute():
-            return path
-        return (runtime_root() / path).resolve()
+        return runtime_data_path(value)
 
     # =====================================================
     # 데이터 폴더
@@ -199,7 +215,7 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         return (
-            PROJECT_ROOT
+            runtime_root()
             / "backend"
             / "data"
         )
@@ -253,10 +269,7 @@ class Settings(BaseSettings):
             "sqlite:///"
         )
 
-        path = Path(raw)
-
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
+        path = runtime_data_path(raw)
 
         return (
             "sqlite:///"

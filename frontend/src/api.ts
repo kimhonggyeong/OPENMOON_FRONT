@@ -42,6 +42,12 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ starred })
     }),
+  mailHearts: () => request<Record<string, boolean>>("/lan-hearts"),
+  setMailHeart: (mailKey: string, hearted: boolean) =>
+    request<{ mail_key: string; hearted: boolean }>("/lan-hearts", {
+      method: "PUT",
+      body: JSON.stringify({ mail_key: mailKey, hearted })
+    }),
   deleteMail: (id: number) =>
     request<{ deleted: number; mode: string; imap_deleted: boolean }>(
       `/mails/${id}`,

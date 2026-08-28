@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import uuid
 import zipfile
 
@@ -2582,6 +2584,28 @@ def _temporary_path(path: Path) -> Path:
     return path.with_name(f".{path.stem}.{uuid.uuid4().hex}.saving.xlsx")
 
 
+_quotation_locks_guard = threading.Lock()
+_quotation_locks: dict[str, threading.Lock] = {}
+
+
+def _quotation_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve()).casefold()
+    with _quotation_locks_guard:
+        return _quotation_locks.setdefault(key, threading.Lock())
+
+
+def _safe_unlink(path: Path, attempts: int = 8) -> None:
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) != 32 and not isinstance(error, PermissionError):
+                return
+            if attempt + 1 < attempts:
+                time.sleep(0.25)
+
+
 def _requires_native_excel(path: Path) -> bool:
     """Detect package features that openpyxl cannot safely round-trip."""
     try:
@@ -2682,20 +2706,21 @@ def _save_with_native_excel(
 
 
 def _atomic_replace(temp_path: Path, target_path: Path) -> None:
-    try:
-        os.replace(temp_path, target_path)
-    except PermissionError as error:
-        raise QuotationFileLockedError(
-            "견적 엑셀 파일이 Excel 또는 다른 프로그램에서 열려 있습니다.\n"
-            "해당 파일을 닫은 뒤 다시 견적서를 생성해주세요."
-        ) from error
-    except OSError as error:
-        if getattr(error, "winerror", None) == 32:
+    for attempt in range(16):
+        try:
+            os.replace(temp_path, target_path)
+            return
+        except OSError as error:
+            locked = isinstance(error, PermissionError) or getattr(error, "winerror", None) == 32
+            if not locked:
+                raise
+            if attempt + 1 < 16:
+                time.sleep(0.25)
+                continue
             raise QuotationFileLockedError(
                 "견적 엑셀 파일이 Excel 또는 다른 프로그램에서 열려 있습니다.\n"
                 "해당 파일을 닫은 뒤 다시 견적서를 생성해주세요."
             ) from error
-        raise
 
 
 def create_quotation(
@@ -2726,6 +2751,7 @@ def create_quotation(
         target_path = generated[storage_mode]
     target, existed = _validate_target(settings, mail, storage_mode, target_path, now)
     target.parent.mkdir(parents=True, exist_ok=True)
+    file_lock = _quotation_lock(target)
     temp_path = _temporary_path(target)
     backup_path: Path | None = None
     replaced = False
@@ -2752,6 +2778,7 @@ def create_quotation(
     )
 
     target_workbook = template_workbook = None
+    file_lock.acquire()
     try:
         session.flush()
         total = 0
@@ -2844,7 +2871,7 @@ def create_quotation(
         return draft
     except QuotationFileLockedError:
         session.rollback()
-        temp_path.unlink(missing_ok=True)
+        _safe_unlink(temp_path)
         if replaced and existed and backup_path and backup_path.exists():
             shutil.copy2(backup_path, target)
         elif not existed:
@@ -2852,7 +2879,7 @@ def create_quotation(
         raise
     except PermissionError as error:
         session.rollback()
-        temp_path.unlink(missing_ok=True)
+        _safe_unlink(temp_path)
         if replaced and existed and backup_path and backup_path.exists():
             shutil.copy2(backup_path, target)
         elif not existed:
@@ -2863,7 +2890,7 @@ def create_quotation(
         ) from error
     except Exception:
         session.rollback()
-        temp_path.unlink(missing_ok=True)
+        _safe_unlink(temp_path)
         if replaced and existed and backup_path and backup_path.exists():
             shutil.copy2(backup_path, target)
         elif not existed:
@@ -2880,6 +2907,7 @@ def create_quotation(
                 template_workbook.close()
             except Exception:
                 pass
+        file_lock.release()
 
 
 def approve_draft(session: Session, draft: QuotationDraft) -> QuotationDraft:

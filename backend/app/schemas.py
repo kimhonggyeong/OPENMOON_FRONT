@@ -121,6 +121,8 @@ class MailListOut(ORMModel):
 
     status: str
     starred: bool = False
+    hearted: bool = False
+    heart_key: str
 
     outer_subject: str | None
     original_subject: str | None

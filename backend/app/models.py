@@ -117,6 +117,14 @@ class Mail(TimestampMixin, Base):
         back_populates="mail", cascade="all, delete-orphan"
     )
 
+    @property
+    def heart_key(self) -> str:
+        """모든 PC에서 동일한 메일을 가리키는 LAN 하트 식별값."""
+        message_id = (self.message_id or "").strip()
+        if message_id:
+            return message_id
+        return f"{self.account}:{self.uid}"
+
 
 class Attachment(TimestampMixin, Base):
     __tablename__ = "attachments"

@@ -7,6 +7,8 @@ import {
   FileDown,
   FileSpreadsheet,
   Inbox,
+  Heart,
+  GripVertical,
   Loader2,
   Maximize2,
   Minimize2,
@@ -553,6 +555,21 @@ function App() {
     }
   }
 
+  async function toggleMailHeart(item: MailListItem) {
+    const hearted = !item.hearted;
+    setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted } : row));
+    setMail((current) => current?.id === item.id ? { ...current, hearted } : current);
+    try {
+      const updated = await api.setMailHeart(item.heart_key, hearted);
+      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: updated.hearted } : row));
+      setMail((current) => current?.id === item.id ? { ...current, hearted: updated.hearted } : current);
+    } catch (err) {
+      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: item.hearted } : row));
+      setMail((current) => current?.id === item.id ? { ...current, hearted: item.hearted } : current);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function loadDrafts() {
     try {
       setDrafts(await api.listDrafts());
@@ -565,6 +582,42 @@ function App() {
     if (view === "draft") void loadDrafts();
     else if (view !== "settings") void loadMails(false);
   }, [view]);
+
+  useEffect(() => {
+    if (view === "draft" || view === "settings") return;
+    let stopped = false;
+
+    const syncHearts = async () => {
+      if (document.visibilityState === "hidden") return;
+      try {
+        const [states, latestMail] = await Promise.all([
+          api.mailHearts(),
+          selectedId ? api.getMail(selectedId) : Promise.resolve(null)
+        ]);
+        if (stopped) return;
+        setMails((current) => current.map((row) => ({
+          ...row,
+          hearted: Boolean(states[row.heart_key])
+        })));
+        setMail((current) => {
+          if (!latestMail || !current || current.id !== latestMail.id) return current;
+          return {
+            ...latestMail,
+            hearted: Boolean(states[latestMail.heart_key])
+          };
+        });
+      } catch {
+        // LAN 연결이 잠시 끊겨도 메인 프로그램은 계속 사용한다.
+      }
+    };
+
+    void syncHearts();
+    const timer = window.setInterval(() => void syncHearts(), 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [view, selectedId]);
 
   useEffect(() => {
     if (selectedId && view !== "draft" && view !== "settings") void loadMail(selectedId);
@@ -966,14 +1019,14 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className="app-shell sidebar-is-collapsed">
+      <aside className="sidebar collapsed">
         <div className="brand">
           <img className="brand-logo" src="/yullinmoon-logo.png" alt="열린문디자인 DESIGN Corp." />
         </div>
         <nav>
           {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
-            <button key={key} className={view === key ? "nav-item active" : "nav-item"} onClick={() => setView(key)}>
+            <button key={key} className={view === key ? "nav-item active" : "nav-item"} onClick={() => setView(key)} title={label} aria-label={label}>
               <Icon size={19} /><span>{label}</span>
               {key === "review" && mails.filter((item) => item.status === "REVIEW_REQUIRED").length > 0 && (
                 <b className="nav-count">{mails.filter((item) => item.status === "REVIEW_REQUIRED").length}</b>
@@ -1120,6 +1173,7 @@ function App() {
                     <div className="mail-card-top">
                       <span className="mail-status-wrap">
                         <button className={item.starred ? "mail-star starred" : "mail-star"} onClick={(event) => { event.stopPropagation(); void toggleMailStar(item); }} aria-label={item.starred ? "별표 해제" : "별표 표시"}><Star size={16} fill={item.starred ? "currentColor" : "none"} /></button>
+                        <button className={item.hearted ? "mail-heart hearted" : "mail-heart"} onClick={(event) => { event.stopPropagation(); void toggleMailHeart(item); }} aria-label={item.hearted ? "공용 하트 끄기" : "공용 하트 켜기"} title="사내 공유 하트"><Heart size={16} fill={item.hearted ? "currentColor" : "none"} /></button>
                         <span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span>
                         {(item.status === "ANALYZING" || analyzingIds.has(item.id)) && <Loader2 className="spin mail-loading" size={14} />}
                       </span>
@@ -1956,12 +2010,39 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
   loading: boolean;
 }) {
   const [form, setForm] = useState<MailDetail>(mail);
+  const formRef = useRef<MailDetail>(mail);
+  const sourceMailRef = useRef<MailDetail>(mail);
+  const lastItemRef = useRef<HTMLDivElement | null>(null);
+  const pendingItemScrollRef = useRef(false);
   const [productCatalog, setProductCatalog] = useState<ProductCatalog | null>(null);
+  const draggedItemIndexRef = useRef<number | null>(null);
   const [productPickerOpen, setProductPickerOpen] = useState(false);
   const [productCatalogLoading, setProductCatalogLoading] = useState(false);
   const [productCatalogError, setProductCatalogError] = useState("");
+  const [editingOrder, setEditingOrder] = useState<Record<number, string>>({});
 
-  useEffect(() => setForm(mail), [mail]);
+  formRef.current = form;
+
+  useEffect(() => {
+    const previousSource = sourceMailRef.current;
+    const currentForm = formRef.current;
+    const switchedMail = previousSource.id !== mail.id;
+    const hasUnsavedChanges = JSON.stringify(currentForm) !== JSON.stringify(previousSource);
+
+    sourceMailRef.current = mail;
+    if (switchedMail || !hasUnsavedChanges) {
+      formRef.current = mail;
+      setForm(mail);
+    }
+  }, [mail]);
+
+  useEffect(() => {
+    if (!pendingItemScrollRef.current) return;
+    pendingItemScrollRef.current = false;
+    window.requestAnimationFrame(() => {
+      lastItemRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [form.items.length]);
 
   useEffect(() => {
     let active = true;
@@ -1993,6 +2074,7 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
       cost_price: null,
       evidence: {}
     };
+    pendingItemScrollRef.current = true;
     setForm((current) => ({ ...current, items: [...current.items, newItem] }));
     setProductPickerOpen(false);
   }
@@ -2006,6 +2088,7 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
       cost_price: null,
       evidence: {}
     };
+    pendingItemScrollRef.current = true;
     setForm((current) => ({ ...current, items: [...current.items, newItem] }));
     setProductPickerOpen(false);
   }
@@ -2029,6 +2112,106 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
       items: current.items.filter((_, itemIndex) => itemIndex !== index)
     }));
   }
+  function startItemDrag(index: number) {
+  draggedItemIndexRef.current = index;
+}
+
+function swapItems(targetIndex: number) {
+  const sourceIndex = draggedItemIndexRef.current;
+
+  if (
+    sourceIndex == null ||
+    sourceIndex === targetIndex
+  ) {
+    return;
+  }
+
+  setForm((current) => {
+    const items = [...current.items];
+
+    if (
+      sourceIndex < 0 ||
+      targetIndex < 0 ||
+      sourceIndex >= items.length ||
+      targetIndex >= items.length
+    ) {
+      return current;
+    }
+
+    // 드래그는 서로 위치 교환
+    [items[sourceIndex], items[targetIndex]] = [
+      items[targetIndex],
+      items[sourceIndex],
+    ];
+
+    return {
+      ...current,
+      items,
+    };
+  });
+
+  draggedItemIndexRef.current = null;
+}
+
+function finishItemDrag() {
+  draggedItemIndexRef.current = null;
+}
+
+/**
+ * 품목 번호를 변경했을 때 사용하는 함수
+ *
+ * 예:
+ * 8번 → 1번
+ *
+ * 기존:
+ * 1 A
+ * 2 B
+ * 3 C
+ * ...
+ * 8 H
+ *
+ * 변경:
+ * 1 H
+ * 2 A
+ * 3 B
+ * ...
+ * 8 G
+ */
+function moveItemToPosition(
+  sourceIndex: number,
+  targetPosition: number
+) {
+  setForm((current) => {
+    const items = [...current.items];
+
+    if (
+      targetPosition < 0 ||
+      targetPosition >= items.length ||
+      sourceIndex < 0 ||
+      sourceIndex >= items.length
+    ) {
+      return current;
+    }
+
+    // 같은 위치라면 아무것도 하지 않음
+    if (sourceIndex === targetPosition) {
+      return current;
+    }
+
+    // 기존 위치에서 품목 제거
+    const [movedItem] = items.splice(sourceIndex, 1);
+
+    // 새로운 위치에 삽입
+    items.splice(targetPosition, 0, movedItem);
+
+    return {
+      ...current,
+      items,
+    };
+  });
+}
+
+
 
   function normalizedProductKey(value?: string | null) {
     return String(value || "")
@@ -2194,13 +2377,108 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
       <div className="form-section"><h3>고객 정보</h3><div className="form-grid two"><Field label="기관명" value={form.customer_organization} onChange={(value) => setForm({ ...form, customer_organization: value })} /><Field label="담당자" value={form.customer_name} onChange={(value) => setForm({ ...form, customer_name: value })} /><Field label="이메일" value={form.customer_email} onChange={(value) => setForm({ ...form, customer_email: value })} /><Field label="전화번호" value={form.customer_phone} onChange={(value) => setForm({ ...form, customer_phone: value })} /><Field label="납품 장소" value={form.delivery_place} onChange={(value) => setForm({ ...form, delivery_place: value })} /><Field label="희망 일정" value={form.requested_date} onChange={(value) => setForm({ ...form, requested_date: value })} /></div></div>
 
       <div className="form-section">
-        <div className="section-title"><h3>주문 품목</h3><button type="button" className="text-button" onClick={() => setProductPickerOpen(true)}>+ 품목 추가</button></div>
+        <div className="section-title"><h3>주문 품목</h3></div>
         {form.items.map((item, index) => {
           const catalogProduct = catalogProductFor(item);
           return (
-            <div className="item-editor" key={item.id ?? `new-${index}`}>
+            <div
+  className="item-editor"
+  ref={index === form.items.length - 1 ? lastItemRef : undefined}
+  key={item.id ?? `new-${index}`}
+  onDragOver={(event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }}
+  onDrop={(event) => {
+    event.preventDefault();
+    swapItems(index);
+  }}
+>
               <div className="item-editor-head">
-                <div className="item-number">{index + 1}</div>
+  <div className="item-number-wrap">
+  {/* 드래그 핸들 */}
+  <div
+    className="item-drag-handle"
+    draggable
+    onDragStart={(event) => {
+      event.stopPropagation();
+
+      startItemDrag(index);
+
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData(
+        "text/plain",
+        String(index)
+      );
+    }}
+    onDragEnd={(event) => {
+      event.stopPropagation();
+      finishItemDrag();
+    }}
+    title="드래그해서 품목 순서 변경"
+  >
+    <GripVertical size={14} />
+  </div>
+
+  {/* 품목 순서 */}
+  <input
+    type="number"
+    min={1}
+    max={form.items.length}
+    value={
+      editingOrder[index] ??
+      String(index + 1)
+    }
+    className="item-order-input"
+    aria-label={`${index + 1}번 품목 순서`}
+    onFocus={() => {
+      setEditingOrder((current) => ({
+        ...current,
+        [index]: String(index + 1),
+      }));
+    }}
+    onChange={(event) => {
+      setEditingOrder((current) => ({
+        ...current,
+        [index]: event.target.value,
+      }));
+    }}
+    onKeyDown={(event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.currentTarget.blur();
+      }
+    }}
+    onBlur={(event) => {
+      const value = Number(event.currentTarget.value);
+
+      // 빈 값 또는 잘못된 값이면 원래 번호로 복구
+      if (
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > form.items.length
+      ) {
+        setEditingOrder((current) => {
+          const next = { ...current };
+          delete next[index];
+          return next;
+        });
+
+        return;
+      }
+
+      const targetPosition = value - 1;
+
+      // 실제 품목 이동
+      moveItemToPosition(
+        index,
+        targetPosition
+      );
+
+      setEditingOrder({});
+    }}
+  />
+</div>
                 <button
                   type="button"
                   className="item-delete-button"
@@ -2332,7 +2610,29 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
 
       <div className="form-section"><h3>분석 요약</h3><textarea className="summary-input" value={form.summary || ""} onChange={(event) => setForm({ ...form, summary: event.target.value })} /></div>
       {missingFields.length > 0 && <p className="blocking-note">견적서 생성 전 필수 항목을 확인해 주세요: {missingFields.join(" / ")}</p>}
-      <div className="action-bar"><button className="button secondary" onClick={save}><Save size={17} /> 수정 저장</button><button className="button primary" disabled={!form.items.length || missingFields.length > 0} onClick={() => onCreate(analysisPayload())}><FileSpreadsheet size={17} /> 견적서 생성</button></div>
+      <div className="action-bar">
+  <button
+    className="button secondary"
+    onClick={() => setProductPickerOpen(true)}
+  >
+    <span>＋</span> 품목 추가
+  </button>
+
+  <button
+    className="button secondary"
+    onClick={save}
+  >
+    <Save size={17} /> 수정 저장
+  </button>
+
+  <button
+    className="button primary"
+    disabled={!form.items.length || missingFields.length > 0}
+    onClick={() => onCreate(analysisPayload())}
+  >
+    <FileSpreadsheet size={17} /> 견적서 생성
+  </button>
+</div>
       </div>
     </>
   );
