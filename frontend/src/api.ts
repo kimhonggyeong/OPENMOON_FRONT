@@ -16,6 +16,8 @@ import type {
 
 const API = "/api";
 
+export const syncEventsUrl = `${API}/sync/events`;
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
     headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
@@ -29,6 +31,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  syncState: () => request<{
+    revision: number;
+    changed_at?: string | null;
+    method?: string | null;
+    path?: string | null;
+  }>("/sync/state"),
   productCatalog: () => request<ProductCatalog>("/products/catalog"),
   listMails: (status?: string, search?: string) => {
     const params = new URLSearchParams();

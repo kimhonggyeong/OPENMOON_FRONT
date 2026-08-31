@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 
 from .config import PROJECT_ROOT, get_settings
 from .database import init_db
 from .routers import agent, chat, imports, lan_hearts, mails, products, quotations, reviews, settings
+from .sync_state import sync_state
 
 app_settings = get_settings()
 app = FastAPI(
@@ -24,6 +28,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def publish_lan_changes(request: Request, call_next):
+    response = await call_next(request)
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path.startswith("/api/")
+        and response.status_code < 400
+    ):
+        payload = sync_state.publish(request.method, request.url.path)
+        await sync_state.broadcast(payload)
+    return response
 
 app.include_router(mails.router)
 app.include_router(products.router)
@@ -44,6 +61,39 @@ def startup() -> None:
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/sync/state")
+def get_sync_state():
+    return sync_state.snapshot()
+
+
+@app.get("/api/sync/events")
+async def sync_events(request: Request):
+    queue = sync_state.subscribe()
+
+    async def event_stream():
+        try:
+            initial = json.dumps(sync_state.snapshot(), ensure_ascii=False)
+            yield f"data: {initial}\n\n"
+            while not await request.is_disconnected():
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=20)
+                    data = json.dumps(payload, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            sync_state.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 frontend_dist = PROJECT_ROOT / "frontend" / "dist"

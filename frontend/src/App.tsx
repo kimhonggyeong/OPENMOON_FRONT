@@ -25,7 +25,7 @@ import {
   Upload,
   XCircle
 } from "lucide-react";
-import { api } from "./api";
+import { api, syncEventsUrl } from "./api";
 import type {
   AgentKnowledge,
   AgentMemory,
@@ -380,9 +380,16 @@ function App() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [storageMail, setStorageMail] = useState<MailDetail | null>(null);
+  const [syncRefreshToken, setSyncRefreshToken] = useState(0);
   const fileRef = useRef<HTMLInputElement>(null);
   const autoSyncingRef = useRef(false);
   const bulkStopRequestedRef = useRef(false);
+  const syncRevisionRef = useRef<number | null>(null);
+  const eventSyncingRef = useRef(false);
+  const sseConnectedRef = useRef(false);
+  const pendingRevisionRef = useRef<number | null>(null);
+  const selectedIdRef = useRef<number | null>(null);
+  const viewRef = useRef<ViewKey>("mail");
 
   const initialWorkbenchLayoutRef = useRef<StoredWorkbenchLayout | null>(null);
 
@@ -458,7 +465,8 @@ function App() {
     try {
       const data = await api.listMails(statusFilter, search || undefined);
       setMails(data);
-      if (!keepSelection || !selectedId || !data.some((item) => item.id === selectedId)) {
+      const currentSelectedId = selectedIdRef.current;
+      if (!keepSelection || !currentSelectedId || !data.some((item) => item.id === currentSelectedId)) {
         setSelectedId(data[0]?.id ?? null);
       }
     } catch (err) {
@@ -466,9 +474,11 @@ function App() {
     }
   }
 
-  async function loadMail(id: number) {
-    setLoading(true);
-    setError("");
+  async function loadMail(id: number, silent = false) {
+    if (!silent) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const detail = await api.getMail(id);
       setMail(detail);
@@ -481,9 +491,9 @@ function App() {
       setHistory(historyData);
       setCompanyHistory(companyHistoryData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (!silent) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -577,6 +587,104 @@ function App() {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+    viewRef.current = view;
+  }, [selectedId, view]);
+
+  useEffect(() => {
+    let stopped = false;
+
+    async function refreshAfterServerChange(incomingState?: { revision: number }) {
+      if (eventSyncingRef.current) {
+        if (incomingState) {
+          pendingRevisionRef.current = Math.max(
+            pendingRevisionRef.current ?? 0,
+            incomingState.revision
+          );
+        }
+        return;
+      }
+      if (document.visibilityState === "hidden") return;
+      eventSyncingRef.current = true;
+
+      try {
+        const state = incomingState ?? await api.syncState();
+        if (stopped) return;
+
+        if (syncRevisionRef.current === null) {
+          syncRevisionRef.current = state.revision;
+          return;
+        }
+        if (state.revision === syncRevisionRef.current) return;
+
+        syncRevisionRef.current = state.revision;
+        const currentId = selectedIdRef.current;
+        const currentView = viewRef.current;
+
+        await loadMails();
+        if (currentId && currentView !== "draft" && currentView !== "settings") {
+          await loadMail(currentId, true);
+        }
+        if (currentView === "draft") await loadDrafts();
+
+        const states = await api.mailHearts();
+        if (stopped) return;
+        setMails((current) => current.map((row) => ({
+          ...row,
+          hearted: Boolean(states[row.heart_key])
+        })));
+        setMail((current) => current ? {
+          ...current,
+          hearted: Boolean(states[current.heart_key])
+        } : current);
+        setSyncRefreshToken((current) => current + 1);
+      } catch {
+        // LAN 연결이 복구되면 최신 revision을 기준으로 전체 상태를 다시 맞춘다.
+      } finally {
+        eventSyncingRef.current = false;
+        const pendingRevision = pendingRevisionRef.current;
+        pendingRevisionRef.current = null;
+        if (pendingRevision != null && pendingRevision !== syncRevisionRef.current) {
+          void refreshAfterServerChange({ revision: pendingRevision });
+        }
+      }
+    }
+
+    const events = new EventSource(syncEventsUrl);
+    events.onopen = () => {
+      sseConnectedRef.current = true;
+    };
+    events.onmessage = (event) => {
+      try {
+        const state = JSON.parse(event.data) as { revision: number };
+        void refreshAfterServerChange(state);
+      } catch {
+        // 잘못된 단일 이벤트는 무시하고 다음 이벤트를 기다린다.
+      }
+    };
+    events.onerror = () => {
+      sseConnectedRef.current = false;
+    };
+
+    void refreshAfterServerChange();
+    const timer = window.setInterval(() => {
+      if (!sseConnectedRef.current) void refreshAfterServerChange();
+    }, 10000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshAfterServerChange();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      stopped = true;
+      events.close();
+      sseConnectedRef.current = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [search, statusFilter]);
 
   useEffect(() => {
     if (view === "draft") void loadDrafts();
@@ -1373,7 +1481,7 @@ function App() {
                 />
               )}
 
-              {mail ? <ChatPanel mail={mail} onMailChanged={(updated) => { setMail(updated); void loadMails(); }} onRequestQuotation={(updated) => setStorageMail(updated)} /> : <EmptySelect />}
+              {mail ? <ChatPanel mail={mail} refreshToken={syncRefreshToken} onMailChanged={(updated) => { setMail(updated); void loadMails(); }} onRequestQuotation={(updated) => setStorageMail(updated)} /> : <EmptySelect />}
             </section>
             <div
               className="bottom-panel-resizer"
@@ -1510,7 +1618,7 @@ function QuotationStorageModal({ mail, onClose, onCreated }: {
   );
 }
 
-function ChatPanel({ mail, onMailChanged, onRequestQuotation }: { mail: MailDetail; onMailChanged: (mail: MailDetail) => void; onRequestQuotation: (mail: MailDetail) => void }) {
+function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { mail: MailDetail; refreshToken: number; onMailChanged: (mail: MailDetail) => void; onRequestQuotation: (mail: MailDetail) => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -1527,8 +1635,11 @@ function ChatPanel({ mail, onMailChanged, onRequestQuotation }: { mail: MailDeta
     setChatNotice("");
     setExpanded(false);
     setQuoteExpanded(false);
-    api.chatMessages(mail.id).then(setMessages).catch((err) => setChatError(err instanceof Error ? err.message : String(err)));
   }, [mail.id]);
+
+  useEffect(() => {
+    api.chatMessages(mail.id).then(setMessages).catch((err) => setChatError(err instanceof Error ? err.message : String(err)));
+  }, [mail.id, refreshToken]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });

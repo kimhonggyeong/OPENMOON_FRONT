@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import runtime_root
 from .services.excel_open_service import open_excel_location
@@ -33,8 +33,19 @@ def clear_guest_temp() -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _forward(method: str, path: str, body: bytes, headers: Iterable[tuple[str, str]]) -> Response:
+def _upstream_target(path: str, query: str = "") -> str:
     target = f"{_upstream}/{path.lstrip('/')}"
+    return f"{target}?{query}" if query else target
+
+
+def _forward(
+    method: str,
+    path: str,
+    query: str,
+    body: bytes,
+    headers: Iterable[tuple[str, str]],
+) -> Response:
+    target = _upstream_target(path, query)
     forwarded_headers = {
         key: value for key, value in headers
         if key.lower() not in {"host", "content-length", "accept-encoding", "connection"}
@@ -55,6 +66,37 @@ def _forward(method: str, path: str, body: bytes, headers: Iterable[tuple[str, s
 
 
 app = FastAPI(title="OPENMOON Guest Proxy")
+
+
+@app.get("/api/sync/events")
+def proxy_sync_events(request: Request):
+    target = _upstream_target("api/sync/events", request.url.query)
+
+    def stream():
+        upstream_request = urllib.request.Request(
+            target,
+            method="GET",
+            headers={"Accept": "text/event-stream"},
+        )
+        while True:
+            try:
+                with urllib.request.urlopen(upstream_request, timeout=30) as remote:
+                    while True:
+                        line = remote.readline()
+                        if not line:
+                            break
+                        yield line
+            except (OSError, urllib.error.URLError):
+                return
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/mails/history/open-source")
@@ -101,4 +143,10 @@ async def open_history_on_guest(request: Request):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy_all(path: str, request: Request):
-    return _forward(request.method, path, await request.body(), request.headers.items())
+    return _forward(
+        request.method,
+        path,
+        request.url.query,
+        await request.body(),
+        request.headers.items(),
+    )

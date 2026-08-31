@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import queue
 import socket
+import sys
 import threading
+import traceback
 import urllib.error
 import urllib.request
 import webbrowser
+from pathlib import Path
 from tkinter import BOTH, CENTER, END, LEFT, Button, Entry, Frame, Label, StringVar, Tk, messagebox
 
 import uvicorn
@@ -205,9 +208,11 @@ class LauncherWindow:
         assert self.selected_heart_url is not None
         clear_guest_temp()
         set_guest_upstream(self.selected_heart_url)
+        from backend.app.guest_proxy import app as guest_proxy_app
+
         self.guest_proxy_server = uvicorn.Server(
             uvicorn.Config(
-                "backend.app.guest_proxy:app",
+                guest_proxy_app,
                 host="127.0.0.1",
                 port=GUEST_PROXY_PORT,
                 reload=False,
@@ -312,8 +317,10 @@ class LauncherWindow:
         self.description(f"{socket.gethostname()}\n{get_lan_ip()}:{HEART_PORT}").pack(pady=8)
         self.description("서버를 준비하고 있습니다…", ACCENT).pack(pady=16)
         self.server_error = None
+        from backend.app.main import app as main_app
+
         self.heart_server = uvicorn.Server(
-            uvicorn.Config("backend.app.main:app", host="0.0.0.0", port=HEART_PORT, reload=False, log_config=None, access_log=False)
+            uvicorn.Config(main_app, host="0.0.0.0", port=HEART_PORT, reload=False, log_config=None, access_log=False)
         )
 
         def run() -> None:
@@ -414,5 +421,27 @@ class LauncherWindow:
         self.root.mainloop()
 
 
+def run_server_only() -> None:
+    """Start the bundled LAN server without the GUI for diagnostics."""
+    try:
+        from backend.app.main import app as main_app
+
+        uvicorn.run(
+            main_app,
+            host="0.0.0.0",
+            port=HEART_PORT,
+            reload=False,
+            log_config=None,
+            access_log=False,
+        )
+    except BaseException:
+        log_path = Path(sys.executable).resolve().parent / "server_start_error.log"
+        log_path.write_text(traceback.format_exc(), encoding="utf-8")
+        raise
+
+
 if __name__ == "__main__":
-    LauncherWindow().run()
+    if "--server-only" in sys.argv:
+        run_server_only()
+    else:
+        LauncherWindow().run()
