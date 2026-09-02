@@ -6,7 +6,9 @@ import sys
 import threading
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
 from pathlib import Path
 from tkinter import BOTH, CENTER, END, LEFT, Button, Entry, Frame, Label, StringVar, Tk, messagebox
@@ -52,6 +54,11 @@ class LauncherWindow:
         self.events: queue.Queue = queue.Queue()
         self.status = StringVar(value="")
         self.search_generation = 0
+        self.user_id = uuid.uuid4().hex
+        self.user_name = ""
+        self.user_color = "#DF7134"
+        self.profile_colors = ("#DF7134", "#E53935", "#D81B60", "#8E24AA", "#3949AB", "#1E88E5", "#00897B", "#43A047", "#F9A825", "#6D4C41")
+        self.color_buttons: list[Button] = []
 
         self.page = Frame(self.root, bg=BG)
         self.page.pack(fill=BOTH, expand=True)
@@ -235,7 +242,7 @@ class LauncherWindow:
 
     def wait_for_guest_proxy(self) -> None:
         if self.guest_proxy_server and self.guest_proxy_server.started:
-            self.show_connected()
+            self.show_user_profile()
             return
         if self.guest_proxy_thread and not self.guest_proxy_thread.is_alive():
             messagebox.showerror("게스트 실행 실패", str(self.server_error or f"로컬 포트 {GUEST_PROXY_PORT}를 사용할 수 없습니다."))
@@ -354,7 +361,7 @@ class LauncherWindow:
                     "port": HEART_PORT,
                 }
                 set_selected_heart_server(local_url)
-                self.show_connected()
+                self.show_user_profile()
                 return
         if self.heart_thread and not self.heart_thread.is_alive():
             messagebox.showerror("서버 시작 실패", str(self.server_error or f"포트 {HEART_PORT}가 이미 사용 중입니다."))
@@ -369,12 +376,58 @@ class LauncherWindow:
             return
         self.root.after(200, self.wait_for_heart_host)
 
+    def show_user_profile(self) -> None:
+        self.clear()
+        self.heading("사용자 선택", 20).pack(pady=(48, 10))
+        self.description("웹을 열기 전에 사용할 이름과 하트 색상을 선택하세요.").pack(pady=(0, 18))
+        self.user_name_entry = Entry(self.page, justify=CENTER, font=("맑은 고딕", 14), bg=CARD, fg=TEXT, relief="solid", bd=1, width=24)
+        self.user_name_entry.pack(ipady=8, pady=(5, 18))
+        if self.user_name:
+            self.user_name_entry.insert(END, self.user_name)
+        self.user_name_entry.focus_set()
+        self.description("하트 색상", TEXT).pack(pady=(0, 8))
+        colors = Frame(self.page, bg=BG)
+        colors.pack()
+        self.color_buttons = []
+        for color in self.profile_colors:
+            button = Button(
+                colors,
+                bg=color,
+                activebackground=color,
+                width=3,
+                height=1,
+                relief="solid",
+                bd=3 if color == self.user_color else 1,
+                cursor="hand2",
+                command=lambda selected=color: self.select_profile_color(selected),
+            )
+            button.pack(side=LEFT, padx=4, pady=7)
+            self.color_buttons.append(button)
+        self.action_button(self.page, "선택 완료", self.confirm_user_profile, True, 24).pack(pady=(24, 7))
+        self.action_button(self.page, "연결 종료", self.stop_servers, width=24).pack(pady=5)
+        self.user_name_entry.bind("<Return>", lambda _event: self.confirm_user_profile())
+
+    def select_profile_color(self, color: str) -> None:
+        self.user_color = color
+        for button, value in zip(self.color_buttons, self.profile_colors):
+            button.configure(bd=3 if value == color else 1)
+
+    def confirm_user_profile(self) -> None:
+        name = self.user_name_entry.get().strip()
+        if not name:
+            messagebox.showwarning("이름 입력", "사용자 이름을 입력해 주세요.")
+            self.user_name_entry.focus_set()
+            return
+        self.user_name = name[:30]
+        self.show_connected()
+
     def show_connected(self) -> None:
         self.clear()
         info = self.selected_server_info or {}
         role = "서버장" if self.is_heart_host else "게스트"
         self.heading("업무 프로그램 실행 중", 20).pack(pady=(62, 10))
         self.description(role, ACCENT).pack(pady=3)
+        self.description(f"{self.user_name}  ●", self.user_color).pack(pady=3)
         self.description(f"{info.get('pc_name') or '서버 PC'}\n{info.get('ip') or self.selected_heart_url}").pack(pady=(5, 22))
         buttons = Frame(self.page, bg=BG)
         buttons.pack()
@@ -383,7 +436,13 @@ class LauncherWindow:
             if not self.is_heart_host
             else (self.selected_heart_url or f"http://127.0.0.1:{HEART_PORT}")
         )
-        self.action_button(buttons, "웹 열기", lambda: webbrowser.open(web_url), True).pack(side=LEFT, padx=7)
+        profile_query = urllib.parse.urlencode({
+            "user_id": self.user_id,
+            "user": self.user_name,
+            "color": self.user_color,
+        })
+        profiled_url = f"{web_url}?{profile_query}"
+        self.action_button(buttons, "웹 열기", lambda: webbrowser.open(profiled_url), True).pack(side=LEFT, padx=7)
         self.action_button(buttons, "공유 서버 종료" if self.is_heart_host else "서버 연결 종료", self.stop_servers).pack(side=LEFT, padx=7)
         self.description("메일, 분석 결과, 품목 수정 내용과 하트 상태를 함께 사용합니다.").pack(pady=(28, 5))
 

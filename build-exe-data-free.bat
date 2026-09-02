@@ -14,11 +14,11 @@ if errorlevel 1 (
 popd
 
 pyinstaller OPENMOON_AI_DATA_FREE.spec --noconfirm --clean ^
-  --distpath exe_release_20260829_v7 ^
-  --workpath exe_build_temp_20260829_v7
+  --distpath exe_release_20260831_v14 ^
+  --workpath exe_build_temp_20260831_v14
 if errorlevel 1 exit /b 1
 
-set RELEASE_DIR=exe_release_20260829_v7\OPENMOON_AI_LAN
+set RELEASE_DIR=exe_release_20260831_v14\OPENMOON_AI_LAN
 mkdir "%RELEASE_DIR%\backend\data\attachments" 2>nul
 mkdir "%RELEASE_DIR%\backend\data\generated_quotes" 2>nul
 mkdir "%RELEASE_DIR%\backend\data\quotation_files" 2>nul

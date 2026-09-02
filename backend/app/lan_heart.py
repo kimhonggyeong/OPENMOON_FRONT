@@ -80,6 +80,9 @@ def server_identifier() -> str:
 class HeartUpdate(BaseModel):
     mail_key: str = Field(min_length=1, max_length=1000)
     hearted: bool
+    user_id: str | None = Field(default=None, max_length=100)
+    user_name: str | None = Field(default=None, max_length=50)
+    color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
 class HeartStore:
@@ -97,42 +100,66 @@ class HeartStore:
 
     def _initialize(self) -> None:
         with self.lock, self._connect() as connection:
-            connection.execute(
-                """
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS mail_hearts (
                     mail_key TEXT PRIMARY KEY,
                     hearted INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    user_id TEXT,
+                    user_name TEXT,
+                    color TEXT
                 )
-                """
-            )
+            """)
+            existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(mail_hearts)")}
+            for name in ("user_id", "user_name", "color"):
+                if name not in existing:
+                    connection.execute(f"ALTER TABLE mail_hearts ADD COLUMN {name} TEXT")
 
-    def all(self) -> dict[str, bool]:
+    def all(self) -> dict[str, dict[str, Any]]:
         with self.lock, self._connect() as connection:
-            rows = connection.execute(
-                "SELECT mail_key, hearted FROM mail_hearts WHERE hearted = 1"
-            ).fetchall()
-        return {str(mail_key): bool(hearted) for mail_key, hearted in rows}
+            rows = connection.execute("SELECT mail_key,hearted,user_id,user_name,color,updated_at FROM mail_hearts WHERE hearted=1").fetchall()
+        return {
+            str(mail_key): {
+                "hearted": bool(hearted),
+                "user_id": user_id,
+                "user_name": user_name or "기존 사용자",
+                "color": color or "#DF7134",
+                "updated_at": updated_at,
+            }
+            for mail_key, hearted, user_id, user_name, color, updated_at in rows
+        }
 
-    def set(self, mail_key: str, hearted: bool) -> bool:
+    def set(
+        self,
+        mail_key: str,
+        hearted: bool,
+        *,
+        user_id: str | None = None,
+        user_name: str | None = None,
+        color: str | None = None,
+    ) -> dict[str, Any]:
         key = mail_key.strip()
         if not key:
             raise ValueError("메일 식별값이 비어 있습니다.")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         with self.lock, self._connect() as connection:
             if hearted:
-                connection.execute(
-                    """
-                    INSERT INTO mail_hearts(mail_key, hearted, updated_at)
-                    VALUES (?, 1, ?)
-                    ON CONFLICT(mail_key) DO UPDATE SET hearted = 1, updated_at = excluded.updated_at
-                    """,
-                    (key, now),
-                )
+                connection.execute("""
+                    INSERT INTO mail_hearts(mail_key,hearted,updated_at,user_id,user_name,color)
+                    VALUES(?,1,?,?,?,?)
+                    ON CONFLICT(mail_key) DO UPDATE SET
+                        hearted=1,updated_at=excluded.updated_at,user_id=excluded.user_id,
+                        user_name=excluded.user_name,color=excluded.color
+                """, (key, now, user_id, user_name, color))
             else:
-                connection.execute("DELETE FROM mail_hearts WHERE mail_key = ?", (key,))
-        return hearted
-
+                connection.execute("DELETE FROM mail_hearts WHERE mail_key=?", (key,))
+        return {
+            "hearted": hearted,
+            "user_id": user_id if hearted else None,
+            "user_name": user_name if hearted else None,
+            "color": color if hearted else None,
+            "updated_at": now,
+        }
 
 def create_heart_app(store: HeartStore | None = None) -> FastAPI:
     heart_store = store or HeartStore()
@@ -149,13 +176,13 @@ def create_heart_app(store: HeartStore | None = None) -> FastAPI:
             "server_id": server_identifier(),
         }
 
-    @app.get("/hearts", response_model=dict[str, bool])
+    @app.get("/hearts", response_model=dict[str, dict[str, Any]])
     def hearts():
         return heart_store.all()
 
     @app.put("/hearts")
     def update_heart(request: HeartUpdate):
-        return {"mail_key": request.mail_key, "hearted": heart_store.set(request.mail_key, request.hearted)}
+        return {"mail_key": request.mail_key, **heart_store.set(request.mail_key, request.hearted, user_id=request.user_id, user_name=request.user_name, color=request.color)}
 
     return app
 

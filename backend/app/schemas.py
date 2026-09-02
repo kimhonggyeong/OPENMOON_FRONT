@@ -504,7 +504,10 @@ class EmailPreview(BaseModel):
     body: str
 
     recipient: str | None
+    customer_recipient: str | None = None
+    delivery_mode: str = "customer"
     attachment_path: str | None
+    attachment_name: str | None = None
 
 
 class OpenHistorySourceRequest(BaseModel):

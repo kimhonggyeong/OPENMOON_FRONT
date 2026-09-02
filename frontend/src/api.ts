@@ -50,13 +50,23 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ starred })
     }),
-  mailHearts: () => request<Record<string, boolean>>("/lan-hearts"),
-  setMailHeart: (mailKey: string, hearted: boolean) =>
-    request<{ mail_key: string; hearted: boolean }>("/lan-hearts", {
+  mailHearts: () => request<Record<string, { hearted: boolean; user_id?: string | null; user_name?: string | null; color?: string | null; updated_at?: string | null }>>("/lan-hearts"),
+  setMailHeart: (mailKey: string, hearted: boolean, profile: { user_id: string; user_name: string; color: string }) =>
+    request<{ mail_key: string; hearted: boolean; user_id?: string | null; user_name?: string | null; color?: string | null }>("/lan-hearts", {
       method: "PUT",
-      body: JSON.stringify({ mail_key: mailKey, hearted })
+      body: JSON.stringify({ mail_key: mailKey, hearted, ...profile })
     }),
-  deleteMail: (id: number) =>
+  listPresence: () => request<Array<{ user_id: string; user_name: string; color: string; last_seen: string }>>("/lan-presence"),
+  updatePresence: (profile: { user_id: string; user_name: string; color: string }) =>
+    request<Array<{ user_id: string; user_name: string; color: string; last_seen: string }>>("/lan-presence", {
+      method: "PUT",
+      body: JSON.stringify(profile)
+    }),
+  removePresence: (userId: string) =>
+    request<Array<{ user_id: string; user_name: string; color: string; last_seen: string }>>(`/lan-presence/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+      keepalive: true
+    }),  deleteMail: (id: number) =>
     request<{ deleted: number; mode: string; imap_deleted: boolean }>(
       `/mails/${id}`,
       { method: "DELETE" }
@@ -106,7 +116,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
-  approveDraft: (id: number, employeeKey: string) => request<Draft>(`/quotations/${id}/approve`, {
+  emailPreview: (id: number, employeeKey = "kim_heejung") => request<{
+    subject: string;
+    body: string;
+    recipient?: string | null;
+    customer_recipient?: string | null;
+    delivery_mode: string;
+    attachment_path?: string | null;
+    attachment_name?: string | null;
+  }>(`/quotations/${id}/email-preview?employee_key=${encodeURIComponent(employeeKey)}`),  approveDraft: (id: number, employeeKey: string) => request<Draft>(`/quotations/${id}/approve`, {
     method: "POST",
     body: JSON.stringify({ employee_key: employeeKey })
   }),
@@ -116,6 +134,11 @@ export const api = {
     request("/import/price-table", { method: "POST", body: JSON.stringify({ path: path || null }) }),
   importHistory: (path: string) =>
     request("/import/quotation-history", { method: "POST", body: JSON.stringify({ path }) }),
+  syncQuotationHistory: () => request<{ processed: number; synced: number; failed: number; errors: Array<{ draft_id: number; error: string }> }>("/data-admin/quotation-history/sync", { method: "POST" }),
+  priceItems: (search = "") => request<Array<Record<string, unknown>>>(`/data-admin/price-items?search=${encodeURIComponent(search)}`),
+  createPriceItem: (payload: Record<string, unknown>) => request<Record<string, unknown>>("/data-admin/price-items", { method: "POST", body: JSON.stringify(payload) }),
+  updatePriceItem: (id: number, payload: Record<string, unknown>) => request<Record<string, unknown>>(`/data-admin/price-items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deletePriceItem: (id: number) => request<{ deleted: number }>(`/data-admin/price-items/${id}`, { method: "DELETE" }),
 
   openPriceSource: (sourceSheet?: string | null, sourceCell?: string | null) =>
     request<OpenPriceSourceResult>("/agent/open-price-source", {

@@ -2772,10 +2772,7 @@ def create_quotation(
         draft.approved_at = draft.sent_at = draft.sent_to = draft.error_message = None
     draft.file_path = str(target)
     draft.email_subject = f"[열린문디자인] 요청하신 견적서를 보내드립니다 - {customer_name}"
-    draft.email_body = (
-        f"안녕하세요. {customer_name} 담당자님.\n\n요청하신 견적서를 첨부하여 보내드립니다.\n"
-        "검토 후 문의사항이 있으시면 회신 부탁드립니다.\n\n감사합니다.\n열린문디자인"
-    )
+    draft.email_body = None
 
     target_workbook = template_workbook = None
     file_lock.acquire()
@@ -2868,6 +2865,11 @@ def create_quotation(
         mail.status = MailStatus.QUOTE_CREATED
         session.commit()
         session.refresh(draft)
+        # 초안을 새로 만들거나 수정한 동안에는 과거 견적 검색에 노출하지 않는다.
+        # 실제 답장 발송이 성공한 뒤 smtp_service에서 다시 등록한다.
+        from .external_db_admin import remove_draft_from_history
+
+        remove_draft_from_history(settings.quotation_database_path, draft.id)
         return draft
     except QuotationFileLockedError:
         session.rollback()

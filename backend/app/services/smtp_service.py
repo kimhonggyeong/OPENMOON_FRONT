@@ -92,12 +92,12 @@ def _append_to_sent(settings: Settings, raw_message: bytes) -> None:
             pass
 
 
-def _email_content(employee_key: str) -> tuple[str, str, Path]:
+def _default_email_body(employee_key: str) -> str:
     employee = EMPLOYEES.get(employee_key)
     if not employee:
         raise ValueError("발송 담당 직원을 선택해주세요.")
     identity = f"{employee['job']} {employee['name']} {employee['rank']}"
-    text = f"""안녕하세요.
+    return f"""안녕하세요.
 (주)열린문디자인 {identity}입니다.
 
 ♥주문 주셔서 진심으로 감사드립니다.♥
@@ -115,6 +115,25 @@ def _email_content(employee_key: str) -> tuple[str, str, Path]:
 
 (주)열린문디자인 {identity}
 ☎ {employee['phone']}"""
+
+
+def _is_legacy_short_body(body: str | None) -> bool:
+    value = (body or "").strip()
+    return (
+        value.startswith("안녕하세요.")
+        and "요청하신 견적서를 첨부하여 보내드립니다." in value
+        and "검토 후 문의사항이 있으시면 회신 부탁드립니다." in value
+        and value.endswith("열린문디자인")
+    )
+
+
+def _email_content(employee_key: str, body: str | None = None) -> tuple[str, str, Path]:
+    employee = EMPLOYEES.get(employee_key)
+    if not employee:
+        raise ValueError("발송 담당 직원을 선택해주세요.")
+    text = _default_email_body(employee_key)
+    if body is not None and body.strip() and not _is_legacy_short_body(body):
+        text = body.strip()
     html = "".join(
         f"<p style=\"margin:0 0 16px;line-height:1.65\">{escape(block).replace(chr(10), '<br>')}</p>"
         for block in text.split("\n\n")
@@ -125,8 +144,6 @@ def _email_content(employee_key: str) -> tuple[str, str, Path]:
         'alt="직원 안내 이미지" style="display:block;max-width:100%;height:auto"></p></div>'
     )
     return text, html, SIGNATURE_ROOT / str(employee["image"])
-
-
 def _validate_customer_pdf_attachment(
     pdf_path: Path,
     internal_xlsx_path: Path | None = None,
@@ -239,7 +256,7 @@ def send_draft(
     message["To"] = recipient
     message["Date"] = format_datetime(datetime.now().astimezone())
     message["Message-ID"] = make_msgid(domain=_sender_address(settings.daum_login_id).split("@", 1)[1])
-    text_body, html_body, signature_path = _email_content(employee_key)
+    text_body, html_body, signature_path = _email_content(employee_key, draft.email_body)
     if not signature_path.exists():
         raise FileNotFoundError(f"직원 서명 이미지를 찾을 수 없습니다: {signature_path}")
     saved_subject = (
@@ -313,4 +330,15 @@ def send_draft(
         raise
     finally:
         session.commit()
+    if draft.status == DraftStatus.SENT:
+        from .external_db_admin import sync_draft_to_history
+
+        try:
+            sync_draft_to_history(settings.quotation_database_path, draft, draft.mail)
+        except Exception:
+            import logging
+
+            # 메일은 이미 발송됐으므로 재발송을 유발하지 않는다.
+            # 설정의 수동 업데이트 버튼으로 안전하게 재시도할 수 있다.
+            logging.getLogger(__name__).exception("발송 완료 견적의 이력 DB 갱신 실패")
     return draft

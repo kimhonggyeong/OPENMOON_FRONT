@@ -32,7 +32,7 @@ def test_successful_mutation_is_visible_to_all_clients(monkeypatch):
     monkeypatch.setattr(
         lan_hearts.store,
         "set",
-        lambda _mail_key, hearted: hearted,
+        lambda _mail_key, hearted, **kwargs: {"hearted": hearted, **kwargs},
     )
 
     with TestClient(app) as client:

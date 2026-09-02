@@ -363,9 +363,32 @@ function statusClass(status: string) {
   return `status status-${status.toLowerCase().replaceAll("_", "-")}`;
 }
 
+type UserProfile = { user_id: string; user_name: string; color: string };
+type ActiveUser = UserProfile & { last_seen: string };
+type SharedHeartState = { hearted: boolean; user_id?: string | null; user_name?: string | null; color?: string | null; updated_at?: string | null };
+
+function loadUserProfile(): UserProfile {
+  const params = new URLSearchParams(window.location.search);
+  const queryName = (params.get("user") || "").trim();
+  const queryColor = params.get("color") || "";
+  const queryId = (params.get("user_id") || "").trim();
+  let stored: Partial<UserProfile> = {};
+  try { stored = JSON.parse(window.localStorage.getItem("openmoon-user-profile") || "{}"); } catch { stored = {}; }
+  const color = /^#[0-9a-f]{6}$/i.test(queryColor) ? queryColor : (/^#[0-9a-f]{6}$/i.test(stored.color || "") ? String(stored.color) : "#DF7134");
+  const profile = {
+    user_id: queryId || stored.user_id || `browser-${Math.random().toString(36).slice(2)}`,
+    user_name: queryName || stored.user_name || "사용자",
+    color
+  };
+  try { window.localStorage.setItem("openmoon-user-profile", JSON.stringify(profile)); } catch { /* 현재 세션에서만 사용 */ }
+  return profile;
+}
 function App() {
   const [view, setView] = useState<ViewKey>("mail");
   const [mails, setMails] = useState<MailListItem[]>([]);
+  const [userProfile] = useState<UserProfile>(loadUserProfile);
+  const [activeUsers, setActiveUsers] = useState<ActiveUser[]>([]);
+  const [heartStates, setHeartStates] = useState<Record<string, SharedHeartState>>({});
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [mail, setMail] = useState<MailDetail | null>(null);
   const [prices, setPrices] = useState<PriceCandidate[]>([]);
@@ -566,20 +589,33 @@ function App() {
   }
 
   async function toggleMailHeart(item: MailListItem) {
-    const hearted = !item.hearted;
+    const previous = heartStates[item.heart_key];
+    const sameUser = Boolean(previous?.hearted && previous.user_id === userProfile.user_id);
+    const hearted = !sameUser;
+    const optimistic: SharedHeartState = hearted
+      ? { hearted: true, ...userProfile }
+      : { hearted: false };
+    setHeartStates((current) => ({ ...current, [item.heart_key]: optimistic }));
     setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted } : row));
     setMail((current) => current?.id === item.id ? { ...current, hearted } : current);
     try {
-      const updated = await api.setMailHeart(item.heart_key, hearted);
-      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: updated.hearted } : row));
-      setMail((current) => current?.id === item.id ? { ...current, hearted: updated.hearted } : current);
+      const updated = await api.setMailHeart(item.heart_key, hearted, userProfile);
+      const state: SharedHeartState = {
+        hearted: updated.hearted,
+        user_id: updated.user_id,
+        user_name: updated.user_name,
+        color: updated.color
+      };
+      setHeartStates((current) => ({ ...current, [item.heart_key]: state }));
+      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: state.hearted } : row));
+      setMail((current) => current?.id === item.id ? { ...current, hearted: state.hearted } : current);
     } catch (err) {
-      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: item.hearted } : row));
-      setMail((current) => current?.id === item.id ? { ...current, hearted: item.hearted } : current);
+      setHeartStates((current) => ({ ...current, [item.heart_key]: previous || { hearted: false } }));
+      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: Boolean(previous?.hearted) } : row));
+      setMail((current) => current?.id === item.id ? { ...current, hearted: Boolean(previous?.hearted) } : current);
       setError(err instanceof Error ? err.message : String(err));
     }
   }
-
   async function loadDrafts() {
     try {
       setDrafts(await api.listDrafts());
@@ -596,7 +632,30 @@ function App() {
   useEffect(() => {
     let stopped = false;
 
-    async function refreshAfterServerChange(incomingState?: { revision: number }) {
+    const announce = async () => {
+      try {
+        const users = await api.updatePresence(userProfile);
+        if (!stopped) setActiveUsers(users);
+      } catch {
+        // 다음 heartbeat 또는 SSE 재연결 때 복구한다.
+      }
+    };
+
+    void announce();
+    const heartbeat = window.setInterval(() => void announce(), 15000);
+    const leave = () => { void api.removePresence(userProfile.user_id).catch(() => undefined); };
+    window.addEventListener("pagehide", leave);
+    return () => {
+      stopped = true;
+      window.clearInterval(heartbeat);
+      window.removeEventListener("pagehide", leave);
+      leave();
+    };
+  }, [userProfile]);
+  useEffect(() => {
+    let stopped = false;
+
+    async function refreshAfterServerChange(incomingState?: { revision: number; path?: string | null }) {
       if (eventSyncingRef.current) {
         if (incomingState) {
           pendingRevisionRef.current = Math.max(
@@ -612,6 +671,12 @@ function App() {
       try {
         const state = incomingState ?? await api.syncState();
         if (stopped) return;
+
+        if (state.path?.startsWith("/api/lan-presence")) {
+          syncRevisionRef.current = state.revision;
+          setActiveUsers(await api.listPresence());
+          return;
+        }
 
         if (syncRevisionRef.current === null) {
           syncRevisionRef.current = state.revision;
@@ -631,13 +696,14 @@ function App() {
 
         const states = await api.mailHearts();
         if (stopped) return;
+        setHeartStates(states);
         setMails((current) => current.map((row) => ({
           ...row,
-          hearted: Boolean(states[row.heart_key])
+          hearted: Boolean(states[row.heart_key]?.hearted)
         })));
         setMail((current) => current ? {
           ...current,
-          hearted: Boolean(states[current.heart_key])
+          hearted: Boolean(states[current.heart_key]?.hearted)
         } : current);
         setSyncRefreshToken((current) => current + 1);
       } catch {
@@ -658,7 +724,7 @@ function App() {
     };
     events.onmessage = (event) => {
       try {
-        const state = JSON.parse(event.data) as { revision: number };
+        const state = JSON.parse(event.data) as { revision: number; path?: string | null };
         void refreshAfterServerChange(state);
       } catch {
         // 잘못된 단일 이벤트는 무시하고 다음 이벤트를 기다린다.
@@ -703,15 +769,16 @@ function App() {
           selectedId ? api.getMail(selectedId) : Promise.resolve(null)
         ]);
         if (stopped) return;
+        setHeartStates(states);
         setMails((current) => current.map((row) => ({
           ...row,
-          hearted: Boolean(states[row.heart_key])
+          hearted: Boolean(states[row.heart_key]?.hearted)
         })));
         setMail((current) => {
           if (!latestMail || !current || current.id !== latestMail.id) return current;
           return {
             ...latestMail,
-            hearted: Boolean(states[latestMail.heart_key])
+            hearted: Boolean(states[latestMail.heart_key]?.hearted)
           };
         });
       } catch {
@@ -1152,6 +1219,14 @@ function App() {
             <p>{view === "mail" ? "고객 메일, AI 분석, 가격 근거를 한 화면에서 검토합니다." : view === "review" ? "필수정보가 누락된 메일만 모아 처리합니다." : view === "draft" ? "생성·승인·발송 상태를 관리합니다." : "Agent 지식, 기억과 연결 상태를 설정합니다."}</p>
           </div>
           <div className="top-actions">
+            <div className="active-user-list" title={`현재 접속자 ${activeUsers.length || 1}명`}>
+              {(activeUsers.length ? activeUsers : [{ ...userProfile, last_seen: "" }]).map((user) => (
+                <div className={user.user_id === userProfile.user_id ? "user-profile-badge current" : "user-profile-badge"} key={user.user_id}>
+                  <span style={{ backgroundColor: user.color }} />
+                  <strong>{user.user_name}</strong>
+                </div>
+              ))}
+            </div>
             {(view === "mail" || view === "review") && (
               <>
                 <input ref={fileRef} type="file" accept=".eml" multiple hidden onChange={(event) => void uploadEml(event.target.files)} />
@@ -1281,7 +1356,7 @@ function App() {
                     <div className="mail-card-top">
                       <span className="mail-status-wrap">
                         <button className={item.starred ? "mail-star starred" : "mail-star"} onClick={(event) => { event.stopPropagation(); void toggleMailStar(item); }} aria-label={item.starred ? "별표 해제" : "별표 표시"}><Star size={16} fill={item.starred ? "currentColor" : "none"} /></button>
-                        <button className={item.hearted ? "mail-heart hearted" : "mail-heart"} onClick={(event) => { event.stopPropagation(); void toggleMailHeart(item); }} aria-label={item.hearted ? "공용 하트 끄기" : "공용 하트 켜기"} title="사내 공유 하트"><Heart size={16} fill={item.hearted ? "currentColor" : "none"} /></button>
+                        <button className={item.hearted ? "mail-heart hearted" : "mail-heart"} style={item.hearted ? { color: heartStates[item.heart_key]?.color || "#DF7134" } : undefined} onClick={(event) => { event.stopPropagation(); void toggleMailHeart(item); }} aria-label={item.hearted ? "공용 하트 변경 또는 해제" : "공용 하트 켜기"} title={heartStates[item.heart_key]?.hearted ? `${heartStates[item.heart_key]?.user_name || "사용자"}님의 하트` : "사내 공유 하트"}><Heart size={16} fill={item.hearted ? "currentColor" : "none"} /></button>
                         <span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span>
                         {(item.status === "ANALYZING" || analyzingIds.has(item.id)) && <Loader2 className="spin mail-loading" size={14} />}
                       </span>
@@ -2808,195 +2883,176 @@ function HistoryAndPricing({ companyHistory, history, prices }: { companyHistory
 
 function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () => Promise<void>; runAction: (action: () => Promise<unknown>, success: string, refresh?: boolean) => Promise<void> }) {
   const [employees, setEmployees] = useState<Record<number, string>>({});
-  const [subjects, setSubjects] = useState<Record<number, string>>({});
-  const [savingSubjectIds, setSavingSubjectIds] = useState<Set<number>>(new Set());
+  const [reviewDraftId, setReviewDraftId] = useState<number | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [sendingIds, setSendingIds] = useState<Set<number>>(new Set());
+  const [preview, setPreview] = useState<{
+    subject: string;
+    body: string;
+    recipient?: string | null;
+    customer_recipient?: string | null;
+    delivery_mode: string;
+    attachment_path?: string | null;
+    attachment_name?: string | null;
+  } | null>(null);
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
 
+  const reviewDraft = drafts.find((draft) => draft.id === reviewDraftId) || null;
   const employeeFor = (draftId: number) => employees[draftId] || "kim_heejung";
 
-  const subjectFor = (draft: Draft) =>
-    subjects[draft.id]
-    ?? draft.email_subject
-    ?? `[열린문디자인] 요청하신 견적서를 보내드립니다 - ${draft.customer_name}`;
-
-  const MANUAL_SUBJECT_VALUE = "__manual__";
+  useEffect(() => {
+    if (!reviewDraft) return;
+    setSubject(reviewDraft.email_subject || "");
+    setBody(reviewDraft.email_body || "");
+  }, [reviewDraft?.id, reviewDraft?.email_subject, reviewDraft?.email_body]);
 
   function subjectPresets(draft: Draft) {
     return [
-      {
-        label: "요청하신 견적서",
-        value: `[열린문디자인] 요청하신 견적서를 보내드립니다 - ${draft.customer_name}`
-      },
-      {
-        label: "견적서 전달",
-        value: `[열린문디자인] 견적서 전달드립니다 - ${draft.customer_name}`
-      },
-      {
-        label: "견적 관련 회신",
-        value: `[열린문디자인] 견적 관련 회신드립니다 - ${draft.customer_name}`
-      }
+      `[열린문디자인] 요청하신 견적서를 보내드립니다 - ${draft.customer_name}`,
+      `[열린문디자인] 견적서 전달드립니다 - ${draft.customer_name}`,
+      `[열린문디자인] 견적 관련 회신드립니다 - ${draft.customer_name}`
     ];
   }
 
-  async function saveDraftSubject(draft: Draft) {
-    const subject = subjectFor(draft).trim();
+  async function openReview(draft: Draft) {
+    setReviewDraftId(draft.id);
+    setReviewLoading(true);
+    setPreview(null);
+    try {
+      const data = await api.emailPreview(draft.id, employeeFor(draft.id));
+      setPreview(data);
+      setSubject(data.subject || draft.email_subject || "");
+      setBody(data.body || draft.email_body || "");
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+      setReviewDraftId(null);
+    } finally {
+      setReviewLoading(false);
+    }
+  }
 
-    if (!subject) {
+  async function changeReviewEmployee(draft: Draft, employeeKey: string) {
+    if (body !== (preview?.body || "") && !window.confirm("수정 중인 본문을 직원별 기본 문구로 바꿀까요?")) return;
+    setEmployees((current) => ({ ...current, [draft.id]: employeeKey }));
+    try {
+      const data = await api.emailPreview(draft.id, employeeKey);
+      setPreview(data);
+      setBody(data.body);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+    }
+  }
+  async function saveReview(showMessage = true) {
+    if (!reviewDraft) return false;
+    if (!subject.trim()) {
       window.alert("발송 제목을 입력해주세요.");
       return false;
     }
-
-    if (savingSubjectIds.has(draft.id)) {
+    if (!body.trim()) {
+      window.alert("메일 본문을 입력해주세요.");
       return false;
     }
-
-    setSavingSubjectIds((current) =>
-      new Set(current).add(draft.id)
-    );
-
+    setSaving(true);
     try {
-      await runAction(
-        () => api.updateDraftEmail(
-          draft.id,
-          { email_subject: subject }
-        ),
-        "발송 제목을 저장했습니다.",
-        false
-      );
-
-      setSubjects((current) => ({
-        ...current,
-        [draft.id]: subject
-      }));
-
+      await api.updateDraftEmail(reviewDraft.id, { email_subject: subject.trim(), email_body: body.trim() });
+      if (showMessage) window.alert("발송 내용을 임시 저장했습니다.");
       await reload();
       return true;
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
-      setSavingSubjectIds((current) => {
-        const next = new Set(current);
-        next.delete(draft.id);
-        return next;
-      });
+      setSaving(false);
     }
   }
 
-  async function persistSubjectBeforeSend(draft: Draft) {
-    const subject = subjectFor(draft).trim();
-
-    if (!subject) {
-      throw new Error("발송 제목을 입력해주세요.");
+  async function sendReviewedDraft() {
+    if (!reviewDraft || sendingIds.has(reviewDraft.id)) return;
+    if (!preview?.attachment_path) {
+      window.alert("고객용 PDF가 없습니다. 견적서를 다시 생성해주세요.");
+      return;
     }
+    if (preview.delivery_mode === "blocked") {
+      window.alert("현재 실제 발송이 차단되어 있습니다. 테스트 모드 또는 발송 설정을 확인해주세요.");
+      return;
+    }
+    const saved = await saveReview(false);
+    if (!saved) return;
+    const employee = employeeFor(reviewDraft.id);
+    const modeText = preview.delivery_mode === "approval_test" ? "승인 테스트" : preview.delivery_mode === "self_test" ? "본인 테스트" : "고객 발송";
+    const retryWarning = reviewDraft.status === "FAILED" || reviewDraft.status === "APPROVED"
+      ? "이전에 발송을 시도한 견적입니다. 수신함을 먼저 확인한 뒤 재발송해주세요.\n\n"
+      : "";
+    if (!window.confirm(`${retryWarning}[${modeText}] ${preview.recipient || "주소 없음"}\n\n위 주소로 최종 발송할까요?`)) return;
 
-    await api.updateDraftEmail(
-      draft.id,
-      { email_subject: subject }
-    );
-  }
-  async function runDraftSend(draftId: number, action: () => Promise<unknown>) {
-    if (sendingIds.has(draftId)) return;
-    setSendingIds((current) => new Set(current).add(draftId));
+    setSendingIds((current) => new Set(current).add(reviewDraft.id));
     try {
-      await runAction(action, "견적서를 승인하고 답장을 발송했습니다.", false);
+      if (reviewDraft.status === "APPROVED") await api.sendDraft(reviewDraft.id);
+      else await api.approveDraft(reviewDraft.id, employee);
+      window.alert("견적서를 승인하고 답장을 발송했습니다.");
+      setReviewDraftId(null);
+      setPreview(null);
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
       await reload();
     } finally {
       setSendingIds((current) => {
         const next = new Set(current);
-        next.delete(draftId);
+        next.delete(reviewDraft.id);
         return next;
       });
     }
   }
+
   return (
     <div className="page-card">
-      <div className="page-card-header"><div><h2>견적서 목록</h2><p>같은 메일에서 다시 생성하면 기존 견적서가 업데이트됩니다.</p></div><button className="icon-button" onClick={() => void reload()}><RefreshCw size={18} /></button></div>
+      <div className="page-card-header"><div><h2>견적서 목록</h2><p>발송 전 검토 패널에서 실제 메일 내용과 첨부파일을 확인한 뒤 전송합니다.</p></div><button className="icon-button" onClick={() => void reload()}><RefreshCw size={18} /></button></div>
       <div className="draft-grid">
         {drafts.map((draft) => (
           <article className={`draft-card ${sendingIds.has(draft.id) ? "is-sending" : ""}`} key={draft.id}>
             {sendingIds.has(draft.id) && <div className="draft-sending-overlay" role="status" aria-live="polite"><Loader2 className="spin" size={34} /><strong>메일 발송 중...</strong><span>견적서 첨부와 보낸메일함 저장을 처리하고 있습니다.</span></div>}
             <div className="draft-top"><span className={`status status-${draft.status.toLowerCase()}`}>{draft.status}</span><small>#{draft.id}</small></div>
-            <h3>{draft.customer_name}</h3><p>{draft.items.map((item) => item.product_name).join(", ") || "품목 없음"}</p><strong>{money(draft.total_amount)}</strong>
-
-            <div className="draft-email-subject">
-              <div className="draft-email-subject-head">
-                <span>고객 발송 제목</span>
-                <small>
-                  {draft.status === "SENT"
-                    ? "발송 완료 후에는 수정할 수 없습니다."
-                    : "예시를 선택하거나 직접 수정할 수 있습니다."}
-                </small>
-              </div>
-
-              <div className="draft-email-subject-controls">
-                <select
-                  value=""
-                  disabled={draft.status === "SENT"}
-                  onChange={(event) => {
-                    const selected = event.target.value;
-                    if (!selected) return;
-
-                    setSubjects((current) => ({
-                      ...current,
-                      [draft.id]: selected === MANUAL_SUBJECT_VALUE ? "" : selected
-                    }));
-                  }}
-                  aria-label="발송 제목 예시 선택"
-                >
-                  <option value="">제목 예시 선택</option>
-                  {subjectPresets(draft).map((preset) => (
-                    <option key={preset.label} value={preset.value}>
-                      {preset.label}
-                    </option>
-                  ))}
-                  <option value={MANUAL_SUBJECT_VALUE}>직접입력</option>
-                </select>
-
-                <input
-                  value={subjectFor(draft)}
-                  disabled={draft.status === "SENT"}
-                  maxLength={300}
-                  onChange={(event) =>
-                    setSubjects((current) => ({
-                      ...current,
-                      [draft.id]: event.target.value
-                    }))
-                  }
-                  placeholder="고객에게 보낼 메일 제목"
-                />
-
-                <button
-                  type="button"
-                  className="button secondary compact"
-                  disabled={
-                    draft.status === "SENT"
-                    || savingSubjectIds.has(draft.id)
-                    || !subjectFor(draft).trim()
-                  }
-                  onClick={() => void saveDraftSubject(draft)}
-                >
-                  {savingSubjectIds.has(draft.id)
-                    ? <Loader2 className="spin" size={14} />
-                    : <Save size={14} />}
-                  제목 저장
-                </button>
-              </div>
+            <h3>{draft.customer_name}</h3>
+            <p>{draft.items.map((item) => item.product_name).join(", ") || "품목 없음"}</p>
+            <strong>{money(draft.total_amount)}</strong>
+            <div className="draft-mail-summary"><small>발송 제목</small><span>{draft.email_subject || "제목 없음"}</span></div>
+            <div className="draft-actions">
+              <a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a>
+              <a className="button secondary compact" href={`/api/quotations/${draft.id}/customer-pdf`} target="_blank" rel="noreferrer"><FileDown size={16} /> PDF</a>
+              {draft.status !== "SENT" && <button className="button primary compact" onClick={() => void openReview(draft)}><MailCheck size={16} /> {draft.status === "FAILED" || draft.status === "APPROVED" ? "재발송 검토" : "발송 전 검토"}</button>}
+              <button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button>
             </div>
-
-            <div className="draft-actions"><a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a><a className="button secondary compact" href={`/api/quotations/${draft.id}/customer-pdf`} target="_blank" rel="noreferrer"><FileDown size={16} /> PDF</a>{(draft.status === "DRAFT" || draft.status === "FAILED") && <><select value={employeeFor(draft.id)} onChange={(event) => setEmployees({ ...employees, [draft.id]: event.target.value })} aria-label="답장 담당 직원"><option value="moon_jeongseon">업무총괄 문정선 대표이사</option><option value="shin_woohyun">관리부서 신우현 주임</option><option value="kwon_jihye">회계담당 권지혜 대리</option><option value="kim_heejung">관리부 김희정 과장</option></select><button className="button primary compact" onClick={() => { const employee = employeeFor(draft.id); const label = ({ moon_jeongseon: "문정선 대표이사", shin_woohyun: "신우현 주임", kwon_jihye: "권지혜 대리", kim_heejung: "김희정 과장" } as Record<string, string>)[employee]; const warning = draft.status === "FAILED" ? "먼저 고객 수신함을 확인해 주세요. 서버 응답 전에 연결이 끊겼다면 이미 전송됐을 수 있습니다. 그래도 다시 발송할까요?" : `${label} 명의로 견적서를 승인하고 고객에게 답장할까요?`; if (window.confirm(warning)) void runDraftSend(draft.id, async () => {
-                    await persistSubjectBeforeSend(draft);
-                    return api.approveDraft(draft.id, employee);
-                  }); }}><Send size={16} /> {draft.status === "FAILED" ? "발송 재시도" : "승인 및 답장"}</button></>}{draft.status === "APPROVED" && <button className="button danger compact" onClick={() => void runDraftSend(draft.id, async () => {
-              await persistSubjectBeforeSend(draft);
-              return api.sendDraft(draft.id);
-            })}><Send size={16} /> 발송 재시도</button>}<button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button></div>
             {draft.error_message && <small className="error-text">{draft.error_message}</small>}
           </article>
         ))}
         {!drafts.length && <div className="empty-state wide"><Archive size={38} /><p>생성된 견적서가 없습니다.</p></div>}
       </div>
+
+      {reviewDraft && <div className="send-review-layer" role="dialog" aria-modal="true" aria-label="발송 전 검토">
+        <button className="send-review-backdrop" aria-label="검토 패널 닫기" onClick={() => setReviewDraftId(null)} />
+        <aside className="send-review-panel">
+          <div className="send-review-head">
+            <div><small>견적 #{reviewDraft.id}</small><h2>발송 전 검토</h2><p>아래 내용이 고객에게 전달되는 최종 메일입니다.</p></div>
+            <button className="icon-button" onClick={() => setReviewDraftId(null)} aria-label="닫기"><XCircle size={19} /></button>
+          </div>
+          {reviewLoading || !preview ? <div className="send-review-loading"><Loader2 className="spin" size={30} /> 미리보기를 불러오는 중...</div> : <>
+            {preview.delivery_mode !== "customer" && <div className={`delivery-mode-banner ${preview.delivery_mode}`}><strong>{preview.delivery_mode === "approval_test" ? "승인 테스트 모드" : preview.delivery_mode === "self_test" ? "본인 테스트 모드" : "발송 차단 상태"}</strong><span>실제 고객 주소: {preview.customer_recipient || "없음"}</span></div>}
+            <label className="review-field"><span>실제 발송 주소</span><input value={preview.recipient || ""} readOnly /></label>
+            <label className="review-field"><span>발송 담당자</span><select value={employeeFor(reviewDraft.id)} onChange={(event) => void changeReviewEmployee(reviewDraft, event.target.value)} disabled={reviewDraft.status === "APPROVED"}><option value="moon_jeongseon">업무총괄 문정선 대표이사</option><option value="shin_woohyun">관리부서 신우현 주임</option><option value="kwon_jihye">회계담당 권지혜 대리</option><option value="kim_heejung">관리부 김희정 과장</option></select></label>
+            <label className="review-field"><span>제목</span><select value="" onChange={(event) => { if (event.target.value) setSubject(event.target.value); }}><option value="">제목 예시 선택</option>{subjectPresets(reviewDraft).map((value) => <option value={value} key={value}>{value}</option>)}</select><input value={subject} maxLength={300} onChange={(event) => setSubject(event.target.value)} /></label>
+            <label className="review-field body"><span>메일 본문</span><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={12} /></label>
+            <section className="review-attachment"><div><small>첨부파일</small><strong>{preview.attachment_name || "고객용 PDF 없음"}</strong></div>{preview.attachment_path && <a className="button secondary compact" href={`/api/quotations/${reviewDraft.id}/customer-pdf`} target="_blank" rel="noreferrer"><FileDown size={15} /> PDF 미리보기</a>}</section>
+            <section className="review-quote-summary"><div><small>고객</small><strong>{reviewDraft.customer_name}</strong></div><div><small>품목</small><strong>{reviewDraft.items.length}개</strong></div><div><small>최종 금액</small><strong>{money(reviewDraft.total_amount)}</strong></div></section>
+            <div className="send-review-actions"><button className="button secondary" disabled={saving || sendingIds.has(reviewDraft.id)} onClick={() => void saveReview()}>{saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />} 임시저장</button><button className="button primary" disabled={saving || sendingIds.has(reviewDraft.id) || !preview.attachment_path || preview.delivery_mode === "blocked"} onClick={() => void sendReviewedDraft()}>{sendingIds.has(reviewDraft.id) ? <Loader2 className="spin" size={16} /> : <Send size={16} />} 승인 및 답장</button></div>
+          </>}
+        </aside>
+      </div>}
     </div>
   );
 }
-
 function AgentSettingsPanel() {
   const [memories, setMemories] = useState<AgentMemory[]>([]);
   const [knowledge, setKnowledge] = useState<AgentKnowledge[]>([]);
@@ -3096,6 +3152,110 @@ function AgentSettingsPanel() {
   );
 }
 
+type ManagedPriceItem = {
+  id: number;
+  product_name: string;
+  normalized_name?: string;
+  category?: string | null;
+  specification?: string | null;
+  width_mm?: number | null;
+  height_mm?: number | null;
+  material?: string | null;
+  paper?: string | null;
+  print_side?: string | null;
+  quantity?: number | null;
+  unit?: string | null;
+  unit_price?: number | null;
+  total_price?: number | null;
+  vat_included?: number | boolean | null;
+};
+
+const EMPTY_PRICE_FORM = {
+  product_name: "", category: "", specification: "", width_mm: "", height_mm: "",
+  material: "", paper: "", print_side: "", quantity: "", unit: "",
+  unit_price: "", total_price: "", vat_included: false
+};
+
+function PriceTableManager() {
+  const [rows, setRows] = useState<ManagedPriceItem[]>([]);
+  const [search, setSearch] = useState("");
+  const [form, setForm] = useState({ ...EMPTY_PRICE_FORM });
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  const load = async (value = search) => {
+    setBusy(true); setError("");
+    try { setRows((await api.priceItems(value)) as unknown as ManagedPriceItem[]); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { void load(""); }, []);
+
+  const numberOrNull = (value: string) => value.trim() === "" ? null : Number(value);
+  const payload = () => ({
+    product_name: form.product_name.trim(), category: form.category.trim() || null,
+    specification: form.specification.trim() || null, width_mm: numberOrNull(form.width_mm),
+    height_mm: numberOrNull(form.height_mm), material: form.material.trim() || null,
+    paper: form.paper.trim() || null, print_side: form.print_side.trim() || null,
+    quantity: numberOrNull(form.quantity), unit: form.unit.trim() || null,
+    unit_price: numberOrNull(form.unit_price), total_price: numberOrNull(form.total_price),
+    vat_included: form.vat_included
+  });
+  const reset = () => { setEditingId(null); setForm({ ...EMPTY_PRICE_FORM }); };
+  const save = async () => {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      if (editingId == null) await api.createPriceItem(payload());
+      else await api.updatePriceItem(editingId, payload());
+      setNotice(editingId == null ? "단가 항목을 추가했습니다." : "단가 항목을 수정했습니다.");
+      reset(); await load();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); setBusy(false); }
+  };
+  const edit = (row: ManagedPriceItem) => {
+    setEditingId(row.id);
+    setForm({
+      product_name: row.product_name || "", category: row.category || "", specification: row.specification || "",
+      width_mm: row.width_mm == null ? "" : String(row.width_mm), height_mm: row.height_mm == null ? "" : String(row.height_mm),
+      material: row.material || "", paper: row.paper || "", print_side: row.print_side || "",
+      quantity: row.quantity == null ? "" : String(row.quantity), unit: row.unit || "",
+      unit_price: row.unit_price == null ? "" : String(row.unit_price), total_price: row.total_price == null ? "" : String(row.total_price),
+      vat_included: Boolean(row.vat_included)
+    });
+  };
+  const remove = async (id: number) => {
+    if (!window.confirm("이 단가 항목을 삭제할까요?")) return;
+    setBusy(true); setError("");
+    try { await api.deletePriceItem(id); if (editingId === id) reset(); await load(); setNotice("단가 항목을 삭제했습니다."); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); setBusy(false); }
+  };
+  const change = (key: keyof typeof EMPTY_PRICE_FORM, value: string | boolean) => setForm({ ...form, [key]: value });
+
+  return <section className="page-card price-manager-card">
+    <div className="page-card-header"><div><h2>단가표 관리</h2><p>서버의 price_table.db에 품목을 직접 추가하거나 기존 단가를 수정합니다.</p></div><button className="icon-button" onClick={() => void load()} title="새로고침">{busy ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}</button></div>
+    <div className="price-search"><input placeholder="품목명 또는 규격 검색" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void load(); }} /><button className="button secondary" onClick={() => void load()}><Search size={15} /> 검색</button></div>
+    <div className="price-editor">
+      <input placeholder="품목명 *" value={form.product_name} onChange={(e) => change("product_name", e.target.value)} />
+      <input placeholder="분류" value={form.category} onChange={(e) => change("category", e.target.value)} />
+      <input className="wide" placeholder="규격 설명" value={form.specification} onChange={(e) => change("specification", e.target.value)} />
+      <input type="number" placeholder="가로(mm)" value={form.width_mm} onChange={(e) => change("width_mm", e.target.value)} />
+      <input type="number" placeholder="세로(mm)" value={form.height_mm} onChange={(e) => change("height_mm", e.target.value)} />
+      <input placeholder="재질" value={form.material} onChange={(e) => change("material", e.target.value)} />
+      <input placeholder="용지" value={form.paper} onChange={(e) => change("paper", e.target.value)} />
+      <input placeholder="인쇄면" value={form.print_side} onChange={(e) => change("print_side", e.target.value)} />
+      <input type="number" placeholder="기준 수량" value={form.quantity} onChange={(e) => change("quantity", e.target.value)} />
+      <input placeholder="단위" value={form.unit} onChange={(e) => change("unit", e.target.value)} />
+      <input type="number" placeholder="단가 *" value={form.unit_price} onChange={(e) => change("unit_price", e.target.value)} />
+      <input type="number" placeholder="총금액" value={form.total_price} onChange={(e) => change("total_price", e.target.value)} />
+      <label className="price-vat"><input type="checkbox" checked={form.vat_included} onChange={(e) => change("vat_included", e.target.checked)} /> 부가세 포함</label>
+      <div className="price-editor-actions"><button className="button primary" disabled={busy} onClick={() => void save()}><Save size={15} /> {editingId == null ? "단가 추가" : "수정 저장"}</button>{editingId != null && <button className="button secondary" onClick={reset}>취소</button>}</div>
+    </div>
+    {notice && <div className="chat-notice">{notice}</div>}{error && <div className="chat-error">{error}</div>}
+    <div className="price-table-wrap"><table className="price-admin-table"><thead><tr><th>품목</th><th>규격/재질</th><th>수량</th><th>단가</th><th></th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.product_name}</strong><small>{row.category || row.normalized_name}</small></td><td>{row.specification || [row.width_mm && `${row.width_mm}mm`, row.height_mm && `${row.height_mm}mm`, row.material, row.paper].filter(Boolean).join(" · ") || "-"}</td><td>{row.quantity ?? "-"} {row.unit || ""}</td><td>{row.unit_price != null ? `${row.unit_price.toLocaleString()}원` : row.total_price != null ? `총 ${row.total_price.toLocaleString()}원` : "-"}</td><td><div className="agent-settings-actions"><button className="button secondary compact" onClick={() => edit(row)}>수정</button><button className="button danger compact" onClick={() => void remove(row.id)}><Trash2 size={13} /></button></div></td></tr>)}</tbody></table>{!rows.length && !busy && <p className="muted">등록된 단가 항목이 없습니다.</p>}</div>
+  </section>;
+}
+
 function SettingsView({ runAction }: { runAction: (action: () => Promise<unknown>, success: string, refresh?: boolean) => Promise<void> }) {
   const [status, setStatus] = useState<Record<string, unknown>>({});
   const [paths, setPaths] = useState<Record<string, string>>({});
@@ -3103,12 +3263,12 @@ function SettingsView({ runAction }: { runAction: (action: () => Promise<unknown
   return (
     <div className="settings-layout v3-settings-layout">
       <section className="page-card"><h2>연결 상태</h2><div className="status-grid"><StatusTile label={status.ai_provider === "anthropic" ? "Claude" : "OpenAI"} enabled={Boolean(status.ai_configured)} /><StatusTile label="Daum 메일" enabled={Boolean(status.mail_configured)} /><StatusTile label="실제 발송" enabled={Boolean(status.live_send_enabled)} warning /></div><div className="path-list">{Object.entries(paths).map(([key, value]) => <div key={key}><span>{key}</span><code>{value || "미설정"}</code></div>)}</div></section>
-      <section className="page-card"><h2>사용자 데이터 연결</h2><div className="settings-block"><h3>현재 단가표 DB</h3><p>price_table.db가 가격 엔진에 정상 연결됐는지 확인합니다.</p><button className="button primary" onClick={() => void runAction(() => api.importPriceTable(), "단가표 DB 연결을 확인했습니다.", false)}><FileSpreadsheet size={17} /> 단가표 DB 확인</button></div><div className="settings-block"><h3>기존 견적 이력 DB</h3><p>quotation_history.db가 가격 엔진에 정상 연결됐는지 확인합니다.</p><button className="button primary" onClick={() => void runAction(() => api.importHistory(""), "견적 이력 DB 연결을 확인했습니다.", false)}><Archive size={17} /> 견적 이력 DB 확인</button></div></section>
+      <section className="page-card"><h2>견적 데이터 관리</h2><div className="settings-block"><h3>견적 이력 수동 업데이트</h3><p>‘승인 및 답장’으로 실제 발송이 완료된 견적만 quotation_history.db에 추가·갱신합니다.</p><button className="button primary" onClick={() => void runAction(() => api.syncQuotationHistory(), "견적 이력 DB 업데이트를 완료했습니다.", false)}><Archive size={17} /> 견적 이력 업데이트</button></div><div className="settings-block"><h3>DB 연결 확인</h3><p>현재 견적 이력 DB와 단가표 DB의 연결 상태를 검사합니다.</p><div className="draft-actions"><button className="button secondary" onClick={() => void runAction(() => api.importHistory(""), "견적 이력 DB 연결을 확인했습니다.", false)}>견적 DB 확인</button><button className="button secondary" onClick={() => void runAction(() => api.importPriceTable(), "단가표 DB 연결을 확인했습니다.", false)}><FileSpreadsheet size={16} /> 단가 DB 확인</button></div></div></section>
+      <PriceTableManager />
       <AgentSettingsPanel />
     </div>
   );
 }
-
 function StatusTile({ label, enabled, warning = false }: { label: string; enabled: boolean; warning?: boolean }) {
   return <div className={`status-tile ${enabled ? (warning ? "warning" : "enabled") : "disabled"}`}>{enabled ? <CheckCircle2 size={22} /> : <XCircle size={22} />}<div><strong>{label}</strong><span>{enabled ? "설정됨" : "미설정"}</span></div></div>;
 }

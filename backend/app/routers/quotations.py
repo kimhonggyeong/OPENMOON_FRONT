@@ -25,7 +25,7 @@ from ..services.quotation_service import (
     customer_pdf_path,
     get_storage_options,
 )
-from ..services.smtp_service import send_draft, validate_send_ready
+from ..services.smtp_service import _email_content, send_draft, validate_send_ready
 
 router = APIRouter(prefix="/api/quotations", tags=["quotations"])
 
@@ -198,6 +198,7 @@ def download_customer_pdf(
 @router.get("/{draft_id}/email-preview", response_model=EmailPreview)
 def email_preview(
     draft_id: int,
+    employee_key: str = "kim_heejung",
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -209,15 +210,31 @@ def email_preview(
         draft,
     )
 
+    try:
+        preview_body = _email_content(employee_key, draft.email_body)[0]
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+    customer_recipient = draft.mail.customer_email or draft.mail.original_sender_email
+    if settings.approval_test_mode:
+        recipient = settings.approval_test_recipient.strip() or None
+        delivery_mode = "approval_test"
+    elif settings.allow_live_send and settings.send_test_to_self:
+        login_id = settings.daum_login_id.strip()
+        recipient = login_id if "@" in login_id else f"{login_id}@daum.net"
+        delivery_mode = "self_test"
+    else:
+        recipient = customer_recipient
+        delivery_mode = "customer" if settings.allow_live_send else "blocked"
+
     return EmailPreview(
         subject=draft.email_subject or "",
-        body=draft.email_body or "",
-        recipient=draft.mail.customer_email or draft.mail.original_sender_email,
-        attachment_path=(
-            str(pdf_path)
-            if pdf_path.exists()
-            else None
-        ),
+        body=preview_body,
+        recipient=recipient,
+        customer_recipient=customer_recipient,
+        delivery_mode=delivery_mode,
+        attachment_path=str(pdf_path) if pdf_path.exists() else None,
+        attachment_name=pdf_path.name if pdf_path.exists() else None,
     )
 
 

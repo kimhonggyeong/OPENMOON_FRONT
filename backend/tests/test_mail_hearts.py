@@ -9,7 +9,7 @@ def test_heart_state_is_shared_and_persists_in_sqlite(tmp_path):
 
     updated = client_one.put(
         "/hearts",
-        json={"mail_key": "<estimate-001@example.com>", "hearted": True},
+        json={"mail_key": "<estimate-001@example.com>", "hearted": True, "user_id": "user-1", "user_name": "김과장", "color": "#1E88E5"},
     )
     assert updated.status_code == 200
     assert updated.json()["hearted"] is True
@@ -17,7 +17,9 @@ def test_heart_state_is_shared_and_persists_in_sqlite(tmp_path):
     client_two = TestClient(create_heart_app(HeartStore(database)))
     shared = client_two.get("/hearts")
     assert shared.status_code == 200
-    assert shared.json()["<estimate-001@example.com>"] is True
+    assert shared.json()["<estimate-001@example.com>"]["hearted"] is True
+    assert shared.json()["<estimate-001@example.com>"]["user_name"] == "김과장"
+    assert shared.json()["<estimate-001@example.com>"]["color"] == "#1E88E5"
 
     cleared = client_two.put(
         "/hearts",

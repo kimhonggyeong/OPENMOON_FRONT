@@ -12,7 +12,7 @@ from starlette.requests import Request
 
 from .config import PROJECT_ROOT, get_settings
 from .database import init_db
-from .routers import agent, chat, imports, lan_hearts, mails, products, quotations, reviews, settings
+from .routers import agent, chat, data_admin, imports, lan_hearts, lan_presence, mails, products, quotations, reviews, settings
 from .sync_state import sync_state
 
 app_settings = get_settings()
@@ -51,6 +51,8 @@ app.include_router(settings.router)
 app.include_router(chat.router)
 app.include_router(agent.router)
 app.include_router(lan_hearts.router)
+app.include_router(lan_presence.router)
+app.include_router(data_admin.router)
 
 
 @app.on_event("startup")
