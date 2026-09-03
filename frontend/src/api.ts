@@ -25,7 +25,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail || response.statusText);
+    throw new Error(Array.isArray(body.detail)
+      ? body.detail.map((error: { msg?: string }) => error.msg || "입력값을 확인해주세요.").join("\n")
+      : body.detail || response.statusText);
   }
   return response.json() as Promise<T>;
 }
@@ -110,7 +112,7 @@ export const api = {
   listDrafts: () => request<Draft[]>("/quotations"),
   updateDraftEmail: (
     id: number,
-    payload: { email_subject: string; email_body?: string | null }
+    payload: { email_subject: string; email_body?: string | null; email_recipients?: string[] }
   ) =>
     request<Draft>(`/quotations/${id}/email`, {
       method: "PATCH",
@@ -120,6 +122,7 @@ export const api = {
     subject: string;
     body: string;
     recipient?: string | null;
+    recipients: string[];
     customer_recipient?: string | null;
     delivery_mode: string;
     attachment_path?: string | null;

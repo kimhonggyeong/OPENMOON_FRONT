@@ -298,6 +298,7 @@ class QuotationDraft(TimestampMixin, Base):
     total_amount: Mapped[int | None] = mapped_column(Integer)
     email_subject: Mapped[str | None] = mapped_column(Text)
     email_body: Mapped[str | None] = mapped_column(Text)
+    email_recipients: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     sent_to: Mapped[str | None] = mapped_column(String(255))

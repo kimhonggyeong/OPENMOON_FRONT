@@ -1437,3 +1437,4 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
 .active-user-list{display:flex;align-items:center;justify-content:flex-end;gap:6px;max-width:420px;overflow-x:auto;padding:2px}
 .active-user-list .user-profile-badge{flex:0 0 auto}
 .active-user-list .user-profile-badge.current{border-color:#c9b9ac;background:#fffaf6}
+.review-recipient-row{display:flex;gap:8px;align-items:center}.review-recipient-row input{flex:1;min-width:0}.review-recipient-row button{flex-shrink:0}.review-recipient-add{align-self:flex-start}

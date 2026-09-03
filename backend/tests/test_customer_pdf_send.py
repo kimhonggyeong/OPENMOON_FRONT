@@ -97,3 +97,35 @@ def test_saved_subject_is_preferred_in_source():
     assert "saved_subject = (" in source
     assert 'message["Subject"] = saved_subject' in source
     assert "draft.email_subject" in source
+
+
+def test_send_uses_all_saved_recipients(monkeypatch, tmp_path):
+    from email.utils import getaddresses
+
+    draft = _draft(tmp_path)
+    draft.email_body = "견적서를 보내드립니다."
+    draft.email_recipients = ["first@example.com", "second@example.com"]
+    pdf = tmp_path / "customer.pdf"
+    pdf.write_bytes(b"%PDF-test")
+    signature = tmp_path / "signature.png"
+    signature.write_bytes(b"test signature")
+    monkeypatch.setattr(smtp_service, "customer_pdf_path", lambda *_: pdf)
+    monkeypatch.setattr(smtp_service, "_email_content", lambda *_: ("body", "<p>body</p>", signature))
+    monkeypatch.setattr(smtp_service, "_append_to_sent", lambda *_: None)
+    monkeypatch.setattr("backend.app.services.external_db_admin.sync_draft_to_history", lambda *_: None)
+    captured = []
+
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def login(self, *args): pass
+        def send_message(self, message): captured.append(message)
+
+    monkeypatch.setattr(smtp_service.smtplib, "SMTP_SSL", FakeSMTP)
+    settings = _settings()
+    settings.quotation_database_path = tmp_path / "history.db"
+    smtp_service.send_draft(SimpleNamespace(commit=lambda: None), settings, draft)
+    assert getaddresses(captured[0].get_all("To")) == [("", "first@example.com"), ("", "second@example.com")]
+    assert draft.sent_to == "first@example.com, second@example.com"
+    assert draft.status == smtp_service.DraftStatus.SENT

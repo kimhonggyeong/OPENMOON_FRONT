@@ -17,6 +17,7 @@ from ..config import Settings
 from ..enums import DraftStatus, MailStatus
 from ..models import QuotationDraft
 from .quotation_service import customer_pdf_path
+from .email_recipients import normalize_recipients
 
 
 SIGNATURE_ROOT = Path(__file__).resolve().parents[2] / "assets" / "email_signatures"
@@ -215,9 +216,10 @@ def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str,
     elif bool(getattr(settings, "send_test_to_self", False)):
         recipient = _sender_address(settings.daum_login_id)
     else:
-        recipient = customer_recipient
-        if not recipient:
-            raise ValueError("고객 이메일 주소가 없습니다.")
+        saved_recipients = getattr(draft, "email_recipients", None)
+        recipient = ", ".join(normalize_recipients(
+            saved_recipients if saved_recipients is not None else [customer_recipient or ""]
+        ))
 
     # 고객에게는 내부 XLSX가 아니라 4-A에서 생성한 고객용 PDF만 보낸다.
     attachment_path = customer_pdf_path(

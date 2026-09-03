@@ -36,6 +36,7 @@ def test_test_mode_routes_to_logged_in_account(monkeypatch, tmp_path):
         lambda settings, draft: pdf,
     )
 
+    draft.email_recipients = ["custom@example.com", "another@example.com"]
     recipient, attachment = validate_send_ready(settings, draft)
 
     assert recipient == "openmoon-test@daum.net"
@@ -74,6 +75,7 @@ def test_approval_test_mode_routes_to_configured_recipient_with_live_send_disabl
         lambda settings, draft: pdf,
     )
 
+    draft.email_recipients = ["custom@example.com", "another@example.com"]
     recipient, attachment = validate_send_ready(settings, draft)
 
     assert recipient == "hk010626@naver.com"

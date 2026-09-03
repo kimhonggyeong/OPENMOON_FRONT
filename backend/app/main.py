@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
+from starlette.concurrency import run_in_threadpool
 
 from .config import PROJECT_ROOT, get_settings
 from .database import init_db
@@ -38,7 +39,12 @@ async def publish_lan_changes(request: Request, call_next):
         and request.url.path.startswith("/api/")
         and response.status_code < 400
     ):
-        payload = sync_state.publish(request.method, request.url.path)
+        # Hearts do not invalidate mail, pricing or chat data.
+        payload = (
+            {"type": "hearts"}
+            if request.url.path == "/api/lan-hearts"
+            else sync_state.publish(request.method, request.url.path)
+        )
         await sync_state.broadcast(payload)
     return response
 
@@ -78,9 +84,14 @@ async def sync_events(request: Request):
         try:
             initial = json.dumps(sync_state.snapshot(), ensure_ascii=False)
             yield f"data: {initial}\n\n"
+            hearts = await run_in_threadpool(lan_hearts.store.all)
+            yield f"data: {json.dumps({'type': 'hearts', 'hearts': hearts}, ensure_ascii=False)}\n\n"
             while not await request.is_disconnected():
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=20)
+                    if payload.get("type") == "hearts":
+                        # Read current state at delivery time, including after queued changes.
+                        payload = {"type": "hearts", "hearts": await run_in_threadpool(lan_hearts.store.all)}
                     data = json.dumps(payload, ensure_ascii=False)
                     yield f"data: {data}\n\n"
                 except TimeoutError:

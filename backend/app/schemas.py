@@ -8,6 +8,7 @@ from pydantic import (
     ConfigDict,
     Field,
     computed_field,
+    field_validator,
 )
 
 
@@ -449,6 +450,13 @@ class CreateQuotationRequest(BaseModel):
 class UpdateQuotationEmailRequest(BaseModel):
     email_subject: str
     email_body: str | None = None
+    email_recipients: list[str] | None = None
+
+    @field_validator("email_recipients")
+    @classmethod
+    def validate_recipients(cls, value):
+        from .services.email_recipients import normalize_recipients
+        return normalize_recipients(value) if value is not None else None
 
 
 class ApproveQuotationRequest(BaseModel):
@@ -504,6 +512,7 @@ class EmailPreview(BaseModel):
     body: str
 
     recipient: str | None
+    recipients: list[str] = Field(default_factory=list)
     customer_recipient: str | None = None
     delivery_mode: str = "customer"
     attachment_path: str | None

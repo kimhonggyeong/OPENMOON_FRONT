@@ -10,6 +10,7 @@ from typing import Iterable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from .config import runtime_root
 from .services.excel_open_service import open_excel_location
@@ -102,6 +103,10 @@ def proxy_sync_events(request: Request):
 @app.post("/api/mails/history/open-source")
 async def open_history_on_guest(request: Request):
     payload = await request.body()
+    return await run_in_threadpool(_open_history_on_guest, payload)
+
+
+def _open_history_on_guest(payload: bytes):
     try:
         values = json.loads(payload.decode("utf-8"))
         sheet = str(values.get("source_sheet") or "")
@@ -143,7 +148,8 @@ async def open_history_on_guest(request: Request):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy_all(path: str, request: Request):
-    return _forward(
+    return await run_in_threadpool(
+        _forward,
         request.method,
         path,
         request.url.query,

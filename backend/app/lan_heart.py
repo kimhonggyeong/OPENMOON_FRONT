@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import json
 import socket
 import sqlite3
@@ -99,7 +100,7 @@ class HeartStore:
         return connection
 
     def _initialize(self) -> None:
-        with self.lock, self._connect() as connection:
+        with self.lock, closing(self._connect()) as connection, connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS mail_hearts (
                     mail_key TEXT PRIMARY KEY,
@@ -116,7 +117,7 @@ class HeartStore:
                     connection.execute(f"ALTER TABLE mail_hearts ADD COLUMN {name} TEXT")
 
     def all(self) -> dict[str, dict[str, Any]]:
-        with self.lock, self._connect() as connection:
+        with self.lock, closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT mail_key,hearted,user_id,user_name,color,updated_at FROM mail_hearts WHERE hearted=1").fetchall()
         return {
             str(mail_key): {
@@ -142,7 +143,7 @@ class HeartStore:
         if not key:
             raise ValueError("메일 식별값이 비어 있습니다.")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
-        with self.lock, self._connect() as connection:
+        with self.lock, closing(self._connect()) as connection, connection:
             if hearted:
                 connection.execute("""
                     INSERT INTO mail_hearts(mail_key,hearted,updated_at,user_id,user_name,color)

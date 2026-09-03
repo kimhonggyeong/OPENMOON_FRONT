@@ -428,6 +428,8 @@ function App() {
   const [userProfile] = useState<UserProfile>(loadUserProfile);
   const [activeUsers, setActiveUsers] = useState<ActiveUser[]>([]);
   const [heartStates, setHeartStates] = useState<Record<string, SharedHeartState>>({});
+  const heartUpdateVersionRef = useRef(0);
+  const pendingHeartKeysRef = useRef(new Set<string>());
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [mail, setMail] = useState<MailDetail | null>(null);
   const [prices, setPrices] = useState<PriceCandidate[]>([]);
@@ -628,6 +630,9 @@ function App() {
   }
 
   async function toggleMailHeart(item: MailListItem) {
+    if (pendingHeartKeysRef.current.has(item.heart_key)) return;
+    pendingHeartKeysRef.current.add(item.heart_key);
+    heartUpdateVersionRef.current += 1;
     const previous = heartStates[item.heart_key];
     const sameUser = Boolean(previous?.hearted && previous.user_id === userProfile.user_id);
     const hearted = !sameUser;
@@ -635,8 +640,6 @@ function App() {
       ? { hearted: true, ...userProfile }
       : { hearted: false };
     setHeartStates((current) => ({ ...current, [item.heart_key]: optimistic }));
-    setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted } : row));
-    setMail((current) => current?.id === item.id ? { ...current, hearted } : current);
     try {
       const updated = await api.setMailHeart(item.heart_key, hearted, userProfile);
       const state: SharedHeartState = {
@@ -645,14 +648,16 @@ function App() {
         user_name: updated.user_name,
         color: updated.color
       };
-      setHeartStates((current) => ({ ...current, [item.heart_key]: state }));
-      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: state.hearted } : row));
-      setMail((current) => current?.id === item.id ? { ...current, hearted: state.hearted } : current);
+      setHeartStates((current) => current[item.heart_key] === optimistic
+        ? { ...current, [item.heart_key]: state }
+        : current);
     } catch (err) {
-      setHeartStates((current) => ({ ...current, [item.heart_key]: previous || { hearted: false } }));
-      setMails((current) => current.map((row) => row.id === item.id ? { ...row, hearted: Boolean(previous?.hearted) } : row));
-      setMail((current) => current?.id === item.id ? { ...current, hearted: Boolean(previous?.hearted) } : current);
+      setHeartStates((current) => current[item.heart_key] === optimistic
+        ? { ...current, [item.heart_key]: previous || { hearted: false } }
+        : current);
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      pendingHeartKeysRef.current.delete(item.heart_key);
     }
   }
   async function loadDrafts() {
@@ -733,17 +738,7 @@ function App() {
         }
         if (currentView === "draft") await loadDrafts();
 
-        const states = await api.mailHearts();
         if (stopped) return;
-        setHeartStates(states);
-        setMails((current) => current.map((row) => ({
-          ...row,
-          hearted: Boolean(states[row.heart_key]?.hearted)
-        })));
-        setMail((current) => current ? {
-          ...current,
-          hearted: Boolean(states[current.heart_key]?.hearted)
-        } : current);
         setSyncRefreshToken((current) => current + 1);
       } catch {
         // LAN 연결이 복구되면 최신 revision을 기준으로 전체 상태를 다시 맞춘다.
@@ -763,7 +758,13 @@ function App() {
     };
     events.onmessage = (event) => {
       try {
-        const state = JSON.parse(event.data) as { revision: number; path?: string | null };
+        if (stopped) return;
+        const state = JSON.parse(event.data) as { revision: number; path?: string | null; type?: string; hearts?: Record<string, SharedHeartState> };
+        if (state.type === "hearts" && state.hearts) {
+          heartUpdateVersionRef.current += 1;
+          setHeartStates(state.hearts);
+          return;
+        }
         void refreshAfterServerChange(state);
       } catch {
         // 잘못된 단일 이벤트는 무시하고 다음 이벤트를 기다린다.
@@ -797,41 +798,36 @@ function App() {
   }, [view]);
 
   useEffect(() => {
-    if (view === "draft" || view === "settings") return;
     let stopped = false;
+    let inFlight = false;
 
     const syncHearts = async () => {
-      if (document.visibilityState === "hidden") return;
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      const version = heartUpdateVersionRef.current;
       try {
-        const [states, latestMail] = await Promise.all([
-          api.mailHearts(),
-          selectedId ? api.getMail(selectedId) : Promise.resolve(null)
-        ]);
-        if (stopped) return;
+        const states = await api.mailHearts();
+        if (stopped || version !== heartUpdateVersionRef.current) return;
         setHeartStates(states);
-        setMails((current) => current.map((row) => ({
-          ...row,
-          hearted: Boolean(states[row.heart_key]?.hearted)
-        })));
-        setMail((current) => {
-          if (!latestMail || !current || current.id !== latestMail.id) return current;
-          return {
-            ...latestMail,
-            hearted: Boolean(states[latestMail.heart_key]?.hearted)
-          };
-        });
       } catch {
         // LAN 연결이 잠시 끊겨도 메인 프로그램은 계속 사용한다.
+      } finally {
+        inFlight = false;
       }
     };
 
     void syncHearts();
-    const timer = window.setInterval(() => void syncHearts(), 5000);
+    const timer = window.setInterval(() => {
+      if (!sseConnectedRef.current) void syncHearts();
+    }, 5000);
+    const onVisible = () => { if (!document.hidden) void syncHearts(); };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       stopped = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [view, selectedId]);
+  }, []);
 
   useEffect(() => {
     if (selectedId && view !== "draft" && view !== "settings") void loadMail(selectedId);
@@ -1395,7 +1391,7 @@ function App() {
                     <div className="mail-card-top">
                       <span className="mail-status-wrap">
                         <button className={item.starred ? "mail-star starred" : "mail-star"} onClick={(event) => { event.stopPropagation(); void toggleMailStar(item); }} aria-label={item.starred ? "별표 해제" : "별표 표시"}><Star size={16} fill={item.starred ? "currentColor" : "none"} /></button>
-                        <button className={item.hearted ? "mail-heart hearted" : "mail-heart"} style={item.hearted ? { color: heartStates[item.heart_key]?.color || "#DF7134" } : undefined} onClick={(event) => { event.stopPropagation(); void toggleMailHeart(item); }} aria-label={item.hearted ? "공용 하트 변경 또는 해제" : "공용 하트 켜기"} title={heartStates[item.heart_key]?.hearted ? `${heartStates[item.heart_key]?.user_name || "사용자"}님의 하트` : "사내 공유 하트"}><Heart size={16} fill={item.hearted ? "currentColor" : "none"} /></button>
+                        <button className={heartStates[item.heart_key]?.hearted ? "mail-heart hearted" : "mail-heart"} style={heartStates[item.heart_key]?.hearted ? { color: heartStates[item.heart_key]?.color || "#DF7134" } : undefined} onClick={(event) => { event.stopPropagation(); void toggleMailHeart(item); }} aria-label={heartStates[item.heart_key]?.hearted ? "공용 하트 변경 또는 해제" : "공용 하트 켜기"} title={heartStates[item.heart_key]?.hearted ? `${heartStates[item.heart_key]?.user_name || "사용자"}님의 하트` : "사내 공유 하트"}><Heart size={16} fill={heartStates[item.heart_key]?.hearted ? "currentColor" : "none"} /></button>
                         <span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span>
                         {(item.status === "ANALYZING" || analyzingIds.has(item.id)) && <Loader2 className="spin mail-loading" size={14} />}
                       </span>
@@ -2938,6 +2934,7 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
     subject: string;
     body: string;
     recipient?: string | null;
+    recipients: string[];
     customer_recipient?: string | null;
     delivery_mode: string;
     attachment_path?: string | null;
@@ -2945,6 +2942,8 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
   } | null>(null);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [recipients, setRecipients] = useState<string[]>([""]);
+  const recipientsLocked = preview?.delivery_mode === "approval_test" || preview?.delivery_mode === "self_test";
 
   const reviewDraft = drafts.find((draft) => draft.id === reviewDraftId) || null;
   const employeeFor = (draftId: number) => employees[draftId] || "kim_heejung";
@@ -2972,6 +2971,7 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
       setPreview(data);
       setSubject(data.subject || draft.email_subject || "");
       setBody(data.body || draft.email_body || "");
+      setRecipients(data.recipients.length ? data.recipients : [""]);
     } catch (err) {
       window.alert(err instanceof Error ? err.message : String(err));
       setReviewDraftId(null);
@@ -3001,9 +3001,16 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
       window.alert("메일 본문을 입력해주세요.");
       return false;
     }
+    if (!recipientsLocked && (!recipients.length || recipients.some((address) => !/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(address.trim())))) {
+      window.alert("각 입력칸에 올바른 이메일 주소를 하나씩 입력해주세요.");
+      return false;
+    }
     setSaving(true);
     try {
-      await api.updateDraftEmail(reviewDraft.id, { email_subject: subject.trim(), email_body: body.trim() });
+      await api.updateDraftEmail(reviewDraft.id, {
+        email_subject: subject.trim(), email_body: body.trim(),
+        ...(recipientsLocked ? {} : { email_recipients: recipients.map((address) => address.trim()) })
+      });
       if (showMessage) window.alert("발송 내용을 임시 저장했습니다.");
       await reload();
       return true;
@@ -3032,7 +3039,7 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
     const retryWarning = reviewDraft.status === "FAILED" || reviewDraft.status === "APPROVED"
       ? "이전에 발송을 시도한 견적입니다. 수신함을 먼저 확인한 뒤 재발송해주세요.\n\n"
       : "";
-    if (!window.confirm(`${retryWarning}[${modeText}] ${preview.recipient || "주소 없음"}\n\n위 주소로 최종 발송할까요?`)) return;
+    if (!window.confirm(`${retryWarning}[${modeText}] ${recipients.join(", ")}\n\n위 주소로 최종 발송할까요?`)) return;
 
     setSendingIds((current) => new Set(current).add(reviewDraft.id));
     try {
@@ -3087,7 +3094,13 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
           </div>
           {reviewLoading || !preview ? <div className="send-review-loading"><Loader2 className="spin" size={30} /> 미리보기를 불러오는 중...</div> : <>
             {preview.delivery_mode !== "customer" && <div className={`delivery-mode-banner ${preview.delivery_mode}`}><strong>{preview.delivery_mode === "approval_test" ? "승인 테스트 모드" : preview.delivery_mode === "self_test" ? "본인 테스트 모드" : "발송 차단 상태"}</strong><span>실제 고객 주소: {preview.customer_recipient || "없음"}</span></div>}
-            <label className="review-field"><span>실제 발송 주소</span><input value={preview.recipient || ""} readOnly /></label>
+            <section className="review-field"><span>실제 발송 주소</span>
+              {recipients.map((address, index) => <div className="review-recipient-row" key={index}>
+                <input type="email" aria-label={`실제 발송 주소 ${index + 1}`} placeholder="name@example.com" value={address} readOnly={recipientsLocked} disabled={saving || sendingIds.has(reviewDraft.id)} onChange={(event) => setRecipients((current) => current.map((value, row) => row === index ? event.target.value : value))} />
+                {!recipientsLocked && <button type="button" className="button secondary compact" aria-label={`발송 주소 ${index + 1} 삭제`} disabled={saving || sendingIds.has(reviewDraft.id)} onClick={() => setRecipients((current) => current.length === 1 ? [""] : current.filter((_, row) => row !== index))}><Trash2 size={15} /> 삭제</button>}
+              </div>)}
+              {recipientsLocked ? <small className="muted">테스트 모드에서는 설정된 테스트 주소로만 발송합니다.</small> : <button type="button" className="button secondary compact review-recipient-add" disabled={saving || sendingIds.has(reviewDraft.id) || recipients.length >= 50} onClick={() => setRecipients((current) => [...current, ""])}>+ 추가</button>}
+            </section>
             <label className="review-field"><span>발송 담당자</span><select value={employeeFor(reviewDraft.id)} onChange={(event) => void changeReviewEmployee(reviewDraft, event.target.value)} disabled={reviewDraft.status === "APPROVED"}><option value="moon_jeongseon">업무총괄 문정선 대표이사</option><option value="shin_woohyun">관리부서 신우현 주임</option><option value="kwon_jihye">회계담당 권지혜 대리</option><option value="kim_heejung">관리부 김희정 과장</option></select></label>
             <label className="review-field"><span>제목</span><select value="" onChange={(event) => { if (event.target.value) setSubject(event.target.value); }}><option value="">제목 예시 선택</option>{subjectPresets(reviewDraft).map((value) => <option value={value} key={value}>{value}</option>)}</select><input value={subject} maxLength={300} onChange={(event) => setSubject(event.target.value)} /></label>
             <label className="review-field body"><span>메일 본문</span><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={12} /></label>

@@ -131,6 +131,8 @@ def update_draft_email(
 
     if request.email_body is not None:
         draft.email_body = request.email_body
+    if request.email_recipients is not None:
+        draft.email_recipients = request.email_recipients
 
     session.commit()
 
@@ -224,13 +226,14 @@ def email_preview(
         recipient = login_id if "@" in login_id else f"{login_id}@daum.net"
         delivery_mode = "self_test"
     else:
-        recipient = customer_recipient
+        recipient = ", ".join(draft.email_recipients) if draft.email_recipients is not None else customer_recipient
         delivery_mode = "customer" if settings.allow_live_send else "blocked"
 
     return EmailPreview(
         subject=draft.email_subject or "",
         body=preview_body,
         recipient=recipient,
+        recipients=[address.strip() for address in (recipient or "").split(",") if address.strip()],
         customer_recipient=customer_recipient,
         delivery_mode=delivery_mode,
         attachment_path=str(pdf_path) if pdf_path.exists() else None,

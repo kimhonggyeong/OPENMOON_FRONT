@@ -57,6 +57,7 @@ def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_columns("quotation_drafts", {"email_recipients": "JSON"})
 
     # Phase 5: 메일 soft-delete.
     # 기존 DB에는 create_all만으로 컬럼이 추가되지 않으므로 명시적으로 보정한다.

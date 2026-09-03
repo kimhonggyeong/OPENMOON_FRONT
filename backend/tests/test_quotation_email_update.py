@@ -10,6 +10,8 @@ from backend.app.database import Base, get_db
 from backend.app.enums import DraftStatus
 from backend.app.models import Mail, QuotationDraft
 from backend.app.routers import quotations
+from backend.app.config import get_settings
+from types import SimpleNamespace
 
 
 def _client():
@@ -119,3 +121,36 @@ def test_sent_draft_subject_is_locked():
     )
 
     assert response.status_code == 409
+
+
+def test_recipient_edits_persist_and_preview_matches(monkeypatch, tmp_path):
+    client, sessions, draft_id = _client()
+    client.app.dependency_overrides[get_settings] = lambda: SimpleNamespace(
+        approval_test_mode=False, allow_live_send=True, send_test_to_self=False,
+    )
+    monkeypatch.setattr(quotations, "customer_pdf_path", lambda *_: tmp_path / "quote.pdf")
+    response = client.patch(f"/api/quotations/{draft_id}/email", json={
+        "email_subject": "견적", "email_recipients": [" first@example.com ", "second@example.com", "first@example.com"],
+    })
+    assert response.status_code == 200
+    with sessions() as session:
+        assert session.get(QuotationDraft, draft_id).email_recipients == ["first@example.com", "second@example.com"]
+    preview = client.get(f"/api/quotations/{draft_id}/email-preview").json()
+    assert preview["recipients"] == ["first@example.com", "second@example.com"]
+    assert preview["recipient"] == "first@example.com, second@example.com"
+    response = client.patch(f"/api/quotations/{draft_id}/email", json={
+        "email_subject": "견적", "email_recipients": ["second@example.com"],
+    })
+    assert response.status_code == 200
+    assert client.get(f"/api/quotations/{draft_id}/email-preview").json()["recipients"] == ["second@example.com"]
+
+
+def test_invalid_or_empty_recipients_are_not_saved():
+    client, sessions, draft_id = _client()
+    for addresses in ([], [""], ["invalid"], ["a@example.com\r\nBcc: b@example.com"], ["a@example.com,b@example.com"]):
+        response = client.patch(f"/api/quotations/{draft_id}/email", json={
+            "email_subject": "견적", "email_recipients": addresses,
+        })
+        assert response.status_code == 422
+    with sessions() as session:
+        assert session.get(QuotationDraft, draft_id).email_recipients is None
