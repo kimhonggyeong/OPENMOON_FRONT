@@ -243,6 +243,40 @@ function quoteValuePresent(value: unknown) {
   return String(value).trim().length > 0;
 }
 
+/**
+ * 견적서 규격란에서 제외할 사양 키 목록을 담는 예약 키.
+ *
+ * spec_attributes(JSON 컬럼) 안에 함께 저장하므로 DB 스키마 변경이 필요 없고,
+ * 품목을 드래그로 옮기거나 저장 후 다시 불러와도 체크 상태가 품목에 따라온다.
+ * 목록에는 카탈로그 field.key 와 (있다면) field.legacy_field 를 함께 넣어
+ * 백엔드가 카탈로그를 다시 조회하지 않고도 판단할 수 있게 한다.
+ */
+const SPEC_HIDDEN_KEY = "__quote_hidden";
+
+function hiddenSpecKeys(item: MailItem): string[] {
+  const raw = item.spec_attributes?.[SPEC_HIDDEN_KEY];
+  return Array.isArray(raw) ? raw.map((value) => String(value)) : [];
+}
+
+function isSpecFieldChecked(
+  item: MailItem,
+  field: ProductCatalogProduct["fields"][number]
+) {
+  return !hiddenSpecKeys(item).includes(field.key);
+}
+
+function nextHiddenSpecKeys(
+  item: MailItem,
+  field: ProductCatalogProduct["fields"][number],
+  checked: boolean
+) {
+  const aliases = [...new Set(
+    [field.key, field.legacy_field].filter((value): value is string => Boolean(value))
+  )];
+  const current = hiddenSpecKeys(item).filter((key) => !aliases.includes(key));
+  return checked ? current : [...current, ...aliases];
+}
+
 function normalizedQuoteProductKey(value?: string | null) {
   return String(value || "")
     .replace(/\s+/g, "")
@@ -329,6 +363,11 @@ function missingQuoteFields(
 
     if (product) {
       for (const field of product.fields) {
+        // 견적서에 인쇄하지 않기로 체크를 푼 사양은 필수값에서 제외한다.
+        if (field.legacy_field !== "quantity" && !isSpecFieldChecked(item, field)) {
+          continue;
+        }
+
         const value = requiredCatalogFieldValue(item, field);
 
         if (!quoteValuePresent(value)) {
@@ -2064,10 +2103,14 @@ function ProductPickerModal({
 function CatalogSpecField({
   field,
   value,
+  isChecked,
+  onToggleCheck,
   onChange
 }: {
   field: ProductCatalogProduct["fields"][number];
   value: unknown;
+  isChecked?: boolean;
+  onToggleCheck?: (checked: boolean) => void;
   onChange: (value: unknown) => void;
 }) {
   const options = field.options || [];
@@ -2091,6 +2134,22 @@ function CatalogSpecField({
     }
   }, [matchedOption, textValue, options.length]);
 
+  // 체크박스는 "이 사양을 견적서에 인쇄할지" 여부만 결정한다.
+  // 입력값 자체는 체크를 풀어도 그대로 보존된다.
+  const labelWithCheckbox = onToggleCheck ? (
+    <label className="catalog-spec-label with-check" title="체크하면 견적서 규격란에 표시됩니다.">
+      <input
+        type="checkbox"
+        className="catalog-spec-check"
+        checked={isChecked !== false}
+        onChange={(event) => onToggleCheck(event.target.checked)}
+      />
+      {field.label}
+    </label>
+  ) : (
+    <span className="catalog-spec-label">{field.label}</span>
+  );
+
   if (isMulti) {
     const selected = Array.isArray(value)
       ? value.map(String)
@@ -2108,7 +2167,7 @@ function CatalogSpecField({
 
     return (
       <div className="catalog-spec-field full">
-        <span className="catalog-spec-label">{field.label}</span>
+        {labelWithCheckbox}
         {!!options.length && (
           <div className="catalog-option-chips">
             {options.map((option) => (
@@ -2141,21 +2200,21 @@ function CatalogSpecField({
 
   if (!options.length) {
     return (
-      <label className="catalog-spec-field">
-        <span className="catalog-spec-label">{field.label}</span>
+      <div className="catalog-spec-field">
+        {labelWithCheckbox}
         <input
           type={isNumber ? "number" : "text"}
           value={textValue}
           onChange={(event) => onChange(event.target.value)}
           placeholder="직접 입력"
         />
-      </label>
+      </div>
     );
   }
 
   return (
-    <label className="catalog-spec-field">
-      <span className="catalog-spec-label">{field.label}</span>
+    <div className="catalog-spec-field">
+      {labelWithCheckbox}
       <select
         value={customMode ? "__custom__" : matchedOption}
         onChange={(event) => {
@@ -2184,7 +2243,7 @@ function CatalogSpecField({
           placeholder="직접 입력"
         />
       )}
-    </label>
+    </div>
   );
 }
 
@@ -2206,6 +2265,22 @@ function AnalysisPanel({ mail, onAnalyze, onSave, onCreate, loading }: {
   const [productCatalogLoading, setProductCatalogLoading] = useState(false);
   const [productCatalogError, setProductCatalogError] = useState("");
   const [editingOrder, setEditingOrder] = useState<Record<number, string>>({});
+
+  function toggleFieldCheck(
+    index: number,
+    field: ProductCatalogProduct["fields"][number],
+    checked: boolean
+  ) {
+    const item = form.items[index];
+    if (!item) return;
+
+    patchItem(index, {
+      spec_attributes: {
+        ...(item.spec_attributes || {}),
+        [SPEC_HIDDEN_KEY]: nextHiddenSpecKeys(item, field, checked)
+      }
+    });
+  }
 
   formRef.current = form;
 
@@ -2324,7 +2399,6 @@ function swapItems(targetIndex: number) {
       return current;
     }
 
-    // 드래그는 서로 위치 교환
     [items[sourceIndex], items[targetIndex]] = [
       items[targetIndex],
       items[sourceIndex],
@@ -2343,26 +2417,6 @@ function finishItemDrag() {
   draggedItemIndexRef.current = null;
 }
 
-/**
- * 품목 번호를 변경했을 때 사용하는 함수
- *
- * 예:
- * 8번 → 1번
- *
- * 기존:
- * 1 A
- * 2 B
- * 3 C
- * ...
- * 8 H
- *
- * 변경:
- * 1 H
- * 2 A
- * 3 B
- * ...
- * 8 G
- */
 function moveItemToPosition(
   sourceIndex: number,
   targetPosition: number
@@ -2379,15 +2433,11 @@ function moveItemToPosition(
       return current;
     }
 
-    // 같은 위치라면 아무것도 하지 않음
     if (sourceIndex === targetPosition) {
       return current;
     }
 
-    // 기존 위치에서 품목 제거
     const [movedItem] = items.splice(sourceIndex, 1);
-
-    // 새로운 위치에 삽입
     items.splice(targetPosition, 0, movedItem);
 
     return {
@@ -2396,8 +2446,6 @@ function moveItemToPosition(
     };
   });
 }
-
-
 
   function normalizedProductKey(value?: string | null) {
     return String(value || "")
@@ -2416,7 +2464,6 @@ function moveItemToPosition(
 
     const products = productCatalog.categories.flatMap((group) => group.products);
 
-    // 1순위: 정확히 같은 표준명/별칭
     for (const product of products) {
       const candidates = [product.name, ...(product.aliases || [])]
         .map((value) => normalizedProductKey(value))
@@ -2427,8 +2474,6 @@ function moveItemToPosition(
       }
     }
 
-    // 2순위: AI가 "친환경 현수막", "고급 명함"처럼 수식어를 붙인 경우.
-    // 배너/미니배너처럼 이름이 겹칠 수 있으므로 가장 긴 일치명을 선택한다.
     let best: { product: ProductCatalogProduct; score: number } | null = null;
 
     for (const product of products) {
@@ -2582,7 +2627,6 @@ function moveItemToPosition(
 >
               <div className="item-editor-head">
   <div className="item-number-wrap">
-  {/* 드래그 핸들 */}
   <div
     className="item-drag-handle"
     draggable
@@ -2606,7 +2650,6 @@ function moveItemToPosition(
     <GripVertical size={14} />
   </div>
 
-  {/* 품목 순서 */}
   <input
     type="number"
     min={1}
@@ -2638,7 +2681,6 @@ function moveItemToPosition(
     onBlur={(event) => {
       const value = Number(event.currentTarget.value);
 
-      // 빈 값 또는 잘못된 값이면 원래 번호로 복구
       if (
         !Number.isInteger(value) ||
         value < 1 ||
@@ -2655,7 +2697,6 @@ function moveItemToPosition(
 
       const targetPosition = value - 1;
 
-      // 실제 품목 이동
       moveItemToPosition(
         index,
         targetPosition
@@ -2707,6 +2748,12 @@ function moveItemToPosition(
                         key={field.key}
                         field={field}
                         value={catalogFieldValue(item, field)}
+                        isChecked={isSpecFieldChecked(item, field)}
+                        onToggleCheck={
+                          field.legacy_field === "quantity"
+                            ? undefined
+                            : (checked) => toggleFieldCheck(index, field, checked)
+                        }
                         onChange={(value) => patchCatalogField(index, field, value)}
                       />
                     ))}
@@ -3035,7 +3082,7 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
         <button className="send-review-backdrop" aria-label="검토 패널 닫기" onClick={() => setReviewDraftId(null)} />
         <aside className="send-review-panel">
           <div className="send-review-head">
-            <div><small>견적 #{reviewDraft.id}</small><h2>발송 전 검토</h2><p>아래 내용이 고객에게 전달되는 최종 메일입니다.</p></div>
+            <div><small>견적 #{reviewDraft.id}</small><h2>발송 전 검토</h2><p>아래 내용이 고객에게 전달되는 최종 메일 분문입니다.</p></div>
             <button className="icon-button" onClick={() => setReviewDraftId(null)} aria-label="닫기"><XCircle size={19} /></button>
           </div>
           {reviewLoading || !preview ? <div className="send-review-loading"><Loader2 className="spin" size={30} /> 미리보기를 불러오는 중...</div> : <>

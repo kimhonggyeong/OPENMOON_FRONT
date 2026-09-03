@@ -633,6 +633,13 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
 }
 .catalog-spec-field.full { grid-column: 1 / -1; }
 .catalog-spec-label { color: #706b64; font-size: 9px; font-weight: 700; }
+.catalog-spec-label.with-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
 .catalog-spec-field select,
 .catalog-spec-field input {
   width: 100%;
@@ -645,6 +652,23 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
   background: #fff;
   color: #363b40;
   font-size: 11px;
+}
+/* 사양 표시 체크박스는 일반 입력칸 스타일(100% 너비/35px 높이)에서 제외한다. */
+.catalog-spec-field input.catalog-spec-check {
+  width: 13px;
+  min-width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  accent-color: #d96d31;
+  cursor: pointer;
+}
+.catalog-spec-field input.catalog-spec-check:focus {
+  border: 0;
+  box-shadow: none;
 }
 .catalog-spec-field select:focus,
 .catalog-spec-field input:focus {

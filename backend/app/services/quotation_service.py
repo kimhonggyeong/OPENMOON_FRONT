@@ -32,7 +32,11 @@ from ..config import PROJECT_ROOT, Settings
 from ..enums import DraftStatus, MailStatus
 from ..models import Mail, QuotationDraft, QuotationDraftItem
 from .price_engine_adapter import calculate_item_price
-from .quote_math import validate_quote_items
+from .quote_math import (
+    SPEC_HIDDEN_KEY,
+    hidden_spec_keys as _hidden_spec_keys,
+    validate_quote_items,
+)
 from .utils import sanitize_filename
 
 StorageMode = Literal["existing", "department", "person", "separate"]
@@ -2135,6 +2139,8 @@ def _dynamic_spec_details(item: Any) -> list[str]:
     if not isinstance(attributes, dict) or not attributes:
         return []
 
+    hidden = _hidden_spec_keys(item)
+
     product_key = _normalized(
         str(
             getattr(item, "normalized_product", None)
@@ -2146,6 +2152,7 @@ def _dynamic_spec_details(item: Any) -> list[str]:
     field_map = _catalog_spec_map().get(product_key, {})
     details: list[str] = []
 
+    # 아래 사양은 legacy 컬럼(_detail_text)에서 이미 출력하므로 중복을 막는다.
     duplicate_legacy_fields = {
         "specification",
         "quantity",
@@ -2155,10 +2162,16 @@ def _dynamic_spec_details(item: Any) -> list[str]:
     }
 
     for key, raw_value in attributes.items():
+        if str(key) == SPEC_HIDDEN_KEY:
+            continue
+
+        if str(key) in hidden:
+            continue
+
         if raw_value in (None, "", []):
             continue
 
-        label, legacy_field = field_map.get(
+        _label, legacy_field = field_map.get(
             str(key),
             (str(key), None),
         )
@@ -2175,8 +2188,9 @@ def _dynamic_spec_details(item: Any) -> list[str]:
         else:
             value = str(raw_value).strip()
 
+        # 견적서 규격란에는 "재질: 부직포"가 아니라 값만 인쇄한다.
         if value:
-            details.append(f"{label}: {value}")
+            details.append(value)
 
     return details
 
@@ -2422,31 +2436,38 @@ def _clear_item_area(sheet) -> None:
 
 
 def _detail_text(item: Any) -> str:
+    """견적서 "품목 및 규격"란 괄호 안에 인쇄할 사양 문구.
+
+    분석 화면에서 체크를 푼 사양은 값이 남아 있어도 인쇄하지 않는다.
+    수량은 별도 열이 있으므로 규격 문구에는 넣지 않는다.
+    """
+    hidden = _hidden_spec_keys(item)
     details: list[str] = []
-    specification = str(item.specification or "").strip()
-    if specification:
-        details.append(specification)
-    width_mm = getattr(item, "width_mm", None)
-    height_mm = getattr(item, "height_mm", None)
-    width_text = f"{width_mm:g}" if isinstance(width_mm, float) else str(width_mm or "")
-    height_text = f"{height_mm:g}" if isinstance(height_mm, float) else str(height_mm or "")
-    if width_mm is not None and height_mm is not None:
-        details.append(f"{width_text}*{height_text}mm")
-    elif width_mm is not None:
-        details.append(f"가로 {width_text}mm")
-    elif height_mm is not None:
-        details.append(f"세로 {height_text}mm")
-    if item.quantity is not None:
-        quantity_text = f"{item.quantity:g}" if isinstance(item.quantity, float) else str(item.quantity)
-        details.append(quantity_text)
+
+    if "specification" not in hidden:
+        specification = str(item.specification or "").strip()
+        if specification:
+            details.append(specification)
+
+        width_mm = getattr(item, "width_mm", None)
+        height_mm = getattr(item, "height_mm", None)
+        width_text = f"{width_mm:g}" if isinstance(width_mm, float) else str(width_mm or "")
+        height_text = f"{height_mm:g}" if isinstance(height_mm, float) else str(height_mm or "")
+        if width_mm is not None and height_mm is not None:
+            details.append(f"{width_text}*{height_text}mm")
+        elif width_mm is not None:
+            details.append(f"가로 {width_text}mm")
+        elif height_mm is not None:
+            details.append(f"세로 {height_text}mm")
+
     paper = getattr(item, "paper", None)
-    if paper:
+    if paper and "paper" not in hidden:
         details.append(str(paper))
     print_sides = getattr(item, "print_sides", None)
-    if print_sides:
+    if print_sides and "print_sides" not in hidden:
         details.append(str(print_sides))
     material = getattr(item, "material", None)
-    if material:
+    if material and "material" not in hidden:
         details.append(str(material))
 
     details.extend(_dynamic_spec_details(item))
