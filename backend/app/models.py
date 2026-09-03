@@ -301,7 +301,7 @@ class QuotationDraft(TimestampMixin, Base):
     email_recipients: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
-    sent_to: Mapped[str | None] = mapped_column(String(255))
+    sent_to: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
 
     mail: Mapped[Mail] = relationship(back_populates="drafts")

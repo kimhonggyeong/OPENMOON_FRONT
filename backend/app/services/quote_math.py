@@ -135,13 +135,6 @@ def hidden_spec_keys(item: Any) -> set[str]:
     return {str(key) for key in raw if str(key).strip()}
 
 
-def _is_field_hidden(item: Any, field: dict[str, Any]) -> bool:
-    if field.get("legacy_field") == "quantity":
-        # 수량은 견적서 표시 여부와 무관하게 항상 필요하다.
-        return False
-    return str(field.get("key") or "") in hidden_spec_keys(item)
-
-
 def _catalog_field_value(item: Any, field: dict[str, Any]) -> Any:
     legacy = field.get("legacy_field")
 
@@ -179,8 +172,6 @@ def missing_catalog_fields(
     missing: list[dict[str, Any]] = []
     for field in product.get("fields", []):
         if keys is not None and field.get("key") not in keys:
-            continue
-        if _is_field_hidden(item, field):
             continue
         if not _present(_catalog_field_value(item, field)):
             missing.append(field)
@@ -232,9 +223,6 @@ def validate_quote_items(items: list[Any]) -> list[str]:
 
         if product:
             for field in product.get("fields", []):
-                if _is_field_hidden(item, field):
-                    continue
-
                 value = _catalog_field_value(item, field)
 
                 if _present(value):

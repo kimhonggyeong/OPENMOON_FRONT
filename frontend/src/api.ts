@@ -26,7 +26,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
     throw new Error(Array.isArray(body.detail)
-      ? body.detail.map((error: { msg?: string }) => error.msg || "입력값을 확인해주세요.").join("\n")
+      ? body.detail
+          .map((error: { msg?: string }) => (error.msg || "입력값을 확인해주세요.").replace(/^Value error,\s*/, ""))
+          .join("\n")
       : body.detail || response.statusText);
   }
   return response.json() as Promise<T>;

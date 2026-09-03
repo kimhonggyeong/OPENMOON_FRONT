@@ -56,6 +56,9 @@ from ..services.price_candidate_service import (
 from ..services.price_service import (
     resolve_standard_product,
 )
+from ..services.quote_math import (
+    SPEC_HIDDEN_KEY,
+)
 from ..services.review_service import (
     evaluate_mail_readiness,
 )
@@ -569,6 +572,17 @@ def update_analysis(
                 getattr(request, field),
             )
 
+        # 품목의 종류(정규화된 품목명)가 바뀌면, 이전 품목 기준으로
+        # 저장된 "인쇄 숨김" 사양 키가 새 품목의 같은 키 필드에
+        # 잘못 이어붙는 것을 막기 위해 이전 매핑을 기억해둔다.
+        previous_products = {
+            existing_item.id: (
+                existing_item.normalized_product
+                or existing_item.product_name
+            )
+            for existing_item in mail.items
+        }
+
         # 기존 품목을 삭제한 뒤
         # 화면에서 전달된 현재 품목으로 다시 생성한다.
         session.execute(
@@ -610,6 +624,18 @@ def update_analysis(
                     product_name,
                 )
             )
+
+            previous_product = previous_products.get(item.id)
+            if (
+                previous_product is not None
+                and previous_product != data["normalized_product"]
+                and isinstance(data.get("spec_attributes"), dict)
+            ):
+                data["spec_attributes"] = {
+                    key: value
+                    for key, value in data["spec_attributes"].items()
+                    if key != SPEC_HIDDEN_KEY
+                }
 
             session.add(
                 MailItem(

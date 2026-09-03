@@ -217,9 +217,14 @@ def validate_send_ready(settings: Settings, draft: QuotationDraft) -> tuple[str,
         recipient = _sender_address(settings.daum_login_id)
     else:
         saved_recipients = getattr(draft, "email_recipients", None)
-        recipient = ", ".join(normalize_recipients(
-            saved_recipients if saved_recipients is not None else [customer_recipient or ""]
-        ))
+        if saved_recipients is not None:
+            recipient = ", ".join(normalize_recipients(saved_recipients))
+        else:
+            # email_recipients가 없는 기존(레거시) 견적 초안은
+            # 새 엄격한 형식 검증 없이, 종전처럼 값이 있는지만 확인한다.
+            recipient = (customer_recipient or "").strip()
+            if not recipient:
+                raise ValueError("고객 이메일 주소가 없습니다.")
 
     # 고객에게는 내부 XLSX가 아니라 4-A에서 생성한 고객용 PDF만 보낸다.
     attachment_path = customer_pdf_path(
