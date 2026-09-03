@@ -26,7 +26,7 @@ from backend.app.lan_heart import (
     private_firewall_rules_ready,
     set_selected_heart_server,
 )
-from backend.app.guest_proxy import clear_guest_temp, set_guest_upstream
+from backend.app.guest_proxy import clear_guest_temp, set_guest_upstream, stop_guest_upstream
 
 
 BG, CARD, TEXT, MUTED, ACCENT = "#f6f3ee", "#ffffff", "#222222", "#6f6a63", "#df7134"
@@ -52,6 +52,8 @@ class LauncherWindow:
         self.guest_proxy_server: uvicorn.Server | None = None
         self.guest_proxy_thread: threading.Thread | None = None
         self.events: queue.Queue = queue.Queue()
+        self.stopping = False
+        self.closing = False
         self.status = StringVar(value="")
         self.search_generation = 0
         self.user_id = uuid.uuid4().hex
@@ -70,6 +72,8 @@ class LauncherWindow:
             while True:
                 callback, result, error = self.events.get_nowait()
                 callback(result, error)
+                if self.closing and self.heart_thread is None and self.guest_proxy_thread is None:
+                    return
         except queue.Empty:
             pass
         self.root.after(80, self.drain_events)
@@ -214,7 +218,7 @@ class LauncherWindow:
     def start_guest_proxy(self) -> None:
         assert self.selected_heart_url is not None
         clear_guest_temp()
-        set_guest_upstream(self.selected_heart_url)
+        set_guest_upstream(self.selected_heart_url, self.user_id)
         from backend.app.guest_proxy import app as guest_proxy_app
 
         self.guest_proxy_server = uvicorn.Server(
@@ -225,6 +229,7 @@ class LauncherWindow:
                 reload=False,
                 log_config=None,
                 access_log=False,
+                timeout_graceful_shutdown=5,
             )
         )
 
@@ -241,6 +246,8 @@ class LauncherWindow:
         self.root.after(150, self.wait_for_guest_proxy)
 
     def wait_for_guest_proxy(self) -> None:
+        if self.stopping or self.closing:
+            return
         if self.guest_proxy_server and self.guest_proxy_server.started:
             self.show_user_profile()
             return
@@ -327,7 +334,7 @@ class LauncherWindow:
         from backend.app.main import app as main_app
 
         self.heart_server = uvicorn.Server(
-            uvicorn.Config(main_app, host="0.0.0.0", port=HEART_PORT, reload=False, log_config=None, access_log=False)
+            uvicorn.Config(main_app, host="0.0.0.0", port=HEART_PORT, reload=False, log_config=None, access_log=False, timeout_graceful_shutdown=5)
         )
 
         def run() -> None:
@@ -343,6 +350,8 @@ class LauncherWindow:
         self.root.after(200, self.wait_for_heart_host)
 
     def wait_for_heart_host(self) -> None:
+        if self.stopping or self.closing:
+            return
         local_url = f"http://127.0.0.1:{HEART_PORT}"
         if self.heart_server and self.heart_server.started:
             try:
@@ -371,8 +380,7 @@ class LauncherWindow:
         self.wait_attempt += 1
         if self.wait_attempt >= 50:
             messagebox.showerror("서버 시작 실패", f"TCP {HEART_PORT} 포트 사용 여부를 확인하세요.")
-            self.stop_servers(show_search=False)
-            self.show_home()
+            self.stop_servers()
             return
         self.root.after(200, self.wait_for_heart_host)
 
@@ -446,13 +454,51 @@ class LauncherWindow:
         self.action_button(buttons, "공유 서버 종료" if self.is_heart_host else "서버 연결 종료", self.stop_servers).pack(side=LEFT, padx=7)
         self.description("메일, 분석 결과, 품목 수정 내용과 하트 상태를 함께 사용합니다.").pack(pady=(28, 5))
 
-    def stop_servers(self, show_search: bool = True) -> None:
-        if self.is_heart_host and self.heart_server:
-            self.heart_server.should_exit = True
-        if self.discovery_responder:
-            self.discovery_responder.stop()
-        if self.guest_proxy_server:
-            self.guest_proxy_server.should_exit = True
+    def stop_servers(self) -> None:
+        if self.stopping:
+            return
+        self.stopping = True
+        self.clear()
+        self.heading("서버 연결 종료 중", 20).pack(pady=(80, 16))
+        self.description("접속자와 실시간 연결을 정리하고 있습니다.").pack()
+
+        def shutdown():
+            if self.heart_server:
+                from backend.app.main import server_stopping
+                server_stopping.set()
+            if self.guest_proxy_server:
+                stop_guest_upstream()
+            if self.selected_heart_url:
+                request = urllib.request.Request(
+                    f"{self.selected_heart_url}/api/lan-presence/{urllib.parse.quote(self.user_id, safe='')}",
+                    method="DELETE",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=3):
+                        pass
+                except (OSError, urllib.error.URLError):
+                    pass  # An unreachable host expires presence automatically.
+            if self.discovery_responder:
+                self.discovery_responder.stop()
+            for server in (self.heart_server, self.guest_proxy_server):
+                if server:
+                    server.config.timeout_graceful_shutdown = 5
+                    server.should_exit = True
+            for thread in (self.heart_thread, self.guest_proxy_thread):
+                if thread:
+                    thread.join(timeout=8)
+                    if thread.is_alive():
+                        raise RuntimeError("서버 종료가 아직 완료되지 않았습니다. 잠시 후 다시 시도해 주세요.")
+            clear_guest_temp()
+
+        self.run_background(shutdown, self.shutdown_finished)
+
+    def shutdown_finished(self, _result, error) -> None:
+        self.stopping = False
+        if error:
+            messagebox.showerror("연결 종료 확인", str(error))
+            self.action_button(self.page, "종료 다시 시도", self.stop_servers).pack(pady=15)
+            return
         set_selected_heart_server(None)
         self.heart_server = None
         self.heart_thread = None
@@ -462,19 +508,15 @@ class LauncherWindow:
         self.selected_heart_url = None
         self.selected_server_info = None
         self.is_heart_host = False
-        clear_guest_temp()
-        if show_search:
-            self.root.after(500, self.show_home)
+        self.user_id = uuid.uuid4().hex
+        if self.closing:
+            self.root.destroy()
+        else:
+            self.show_home()
 
     def close(self) -> None:
-        if self.heart_server:
-            self.heart_server.should_exit = True
-        if self.discovery_responder:
-            self.discovery_responder.stop()
-        if self.guest_proxy_server:
-            self.guest_proxy_server.should_exit = True
-        clear_guest_temp()
-        self.root.destroy()
+        self.closing = True
+        self.stop_servers()
 
     def run(self) -> None:
         self.root.mainloop()

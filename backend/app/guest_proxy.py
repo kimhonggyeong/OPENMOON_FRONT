@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import queue
+import threading
 import shutil
 import urllib.error
 import urllib.request
@@ -17,11 +20,24 @@ from .services.excel_open_service import open_excel_location
 
 
 _upstream = ""
+_session_stopped = threading.Event()
+_session_user = ""
+_presence_lock = threading.Lock()
 
 
-def set_guest_upstream(url: str) -> None:
-    global _upstream
+def set_guest_upstream(url: str, user_id: str = "") -> None:
+    global _upstream, _session_stopped, _session_user
+    _session_stopped.set()
+    _session_stopped = threading.Event()
+    _session_user = user_id
     _upstream = url.rstrip("/")
+
+
+def stop_guest_upstream() -> None:
+    _session_stopped.set()
+    # Finish an already accepted heartbeat before the launcher removes presence.
+    with _presence_lock:
+        pass
 
 
 def guest_temp_dir() -> Path:
@@ -53,7 +69,7 @@ def _forward(
     }
     request = urllib.request.Request(target, data=body or None, method=method, headers=forwarded_headers)
     try:
-        with urllib.request.urlopen(request, timeout=120) as remote:
+        with urllib.request.urlopen(request, timeout=5 if path.rstrip("/") == "api/lan-presence" else 120) as remote:
             data = remote.read()
             content_type = remote.headers.get("Content-Type", "application/octet-stream")
             return Response(data, status_code=remote.status, media_type=content_type.split(";", 1)[0])
@@ -69,26 +85,59 @@ def _forward(
 app = FastAPI(title="OPENMOON Guest Proxy")
 
 
+@app.middleware("http")
+async def check_session(request: Request, call_next):
+    user = request.headers.get("X-Openmoon-User") or request.query_params.get("user_id")
+    if request.url.path.startswith("/api/") and (
+        _session_stopped.is_set() or (_session_user and user is not None and user != _session_user)
+    ):
+        return JSONResponse(status_code=410, content={"detail": "서버 연결이 종료되었습니다. 실행 창에서 웹을 다시 열어 주세요."})
+    return await call_next(request)
+
+
 @app.get("/api/sync/events")
 def proxy_sync_events(request: Request):
     target = _upstream_target("api/sync/events", request.url.query)
+    stopped = _session_stopped
+    finished = threading.Event()
+    lines: queue.Queue = queue.Queue(maxsize=100)
 
-    def stream():
+    def read_remote():
         upstream_request = urllib.request.Request(
             target,
             method="GET",
             headers={"Accept": "text/event-stream"},
         )
-        while True:
-            try:
-                with urllib.request.urlopen(upstream_request, timeout=30) as remote:
-                    while True:
-                        line = remote.readline()
-                        if not line:
+        try:
+            with urllib.request.urlopen(upstream_request, timeout=30) as remote:
+                while not stopped.is_set() and not finished.is_set():
+                    line = remote.readline()
+                    if not line:
+                        break
+                    while not stopped.is_set() and not finished.is_set():
+                        try:
+                            lines.put(line, timeout=0.2)
                             break
-                        yield line
-            except (OSError, urllib.error.URLError):
-                return
+                        except queue.Full:
+                            pass
+        except (OSError, urllib.error.URLError):
+            pass
+        finally:
+            finished.set()
+
+    async def stream():
+        threading.Thread(target=read_remote, daemon=True).start()
+        try:
+            while not stopped.is_set():
+                try:
+                    yield lines.get_nowait()
+                except queue.Empty:
+                    if finished.is_set():
+                        return
+                    await asyncio.sleep(0.1)
+            yield b'data: {"type":"disconnected"}\n\n'
+        finally:
+            finished.set()
 
     return StreamingResponse(
         stream(),
@@ -148,6 +197,22 @@ def _open_history_on_guest(payload: bytes):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy_all(path: str, request: Request):
+    if path.rstrip("/") == "api/lan-presence" and request.method == "PUT":
+        body = await request.body()
+        stopped = _session_stopped
+        try:
+            profile = json.loads(body)
+            user_id = profile.get("user_id") if isinstance(profile, dict) else None
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse(status_code=400, content={"detail": "접속자 정보가 올바르지 않습니다."})
+
+        def heartbeat():
+            with _presence_lock:
+                if stopped.is_set() or (_session_user and user_id != _session_user):
+                    return JSONResponse(status_code=410, content={"detail": "서버 연결이 종료되었습니다."})
+                return _forward(request.method, path, request.url.query, body, request.headers.items())
+
+        return await run_in_threadpool(heartbeat)
     return await run_in_threadpool(
         _forward,
         request.method,

@@ -18,13 +18,22 @@ import type {
 
 const API = "/api";
 
-export const syncEventsUrl = `${API}/sync/events`;
+const sessionUser = new URLSearchParams(window.location.search).get("user_id") || "";
+export const syncEventsUrl = `${API}/sync/events?user_id=${encodeURIComponent(sessionUser)}`;
+let connectionEnded = false;
+export function endConnection() {
+  if (connectionEnded) return;
+  connectionEnded = true;
+  window.dispatchEvent(new Event("openmoon-disconnected"));
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  if (connectionEnded) throw new Error("서버 연결이 종료되었습니다.");
   const response = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
-    ...options
+    ...options,
+    headers: { "Content-Type": "application/json", "X-Openmoon-User": sessionUser, ...(options?.headers || {}) }
   });
+  if (response.status === 410) endConnection();
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
     throw new Error(Array.isArray(body.detail)
@@ -86,9 +95,11 @@ export const api = {
       body: JSON.stringify({ limit, include_existing: false })
     }),
   uploadEml: async (files: File[]) => {
+    if (connectionEnded) throw new Error("서버 연결이 종료되었습니다.");
     const form = new FormData();
     files.forEach((file) => form.append("files", file));
-    const response = await fetch(`${API}/mails/import-eml`, { method: "POST", body: form });
+    const response = await fetch(`${API}/mails/import-eml`, { method: "POST", headers: { "X-Openmoon-User": sessionUser }, body: form });
+    if (response.status === 410) endConnection();
     if (!response.ok) throw new Error((await response.json()).detail || "EML 업로드 실패");
     return response.json() as Promise<MailListItem[]>;
   },

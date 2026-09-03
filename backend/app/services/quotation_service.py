@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -50,6 +51,7 @@ SCHEDULE_COLUMN = 14
 EXCEL_COM_SCRIPT = r'''
 param([string]$TargetPath, [string]$TemplatePath, [string]$TemplateSheet, [string]$PayloadPath)
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 function Set-ExcelValue($Range, $Value) {
     if ($null -eq $Value) { $Range.ClearContents(); return }
     if ($Value -is [byte] -or $Value -is [int16] -or $Value -is [int32] -or $Value -is [int64] -or $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) {
@@ -67,25 +69,34 @@ try {
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
-    $targetBook = $excel.Workbooks.Open($TargetPath, 0, $false)
+    $newFile = -not (Test-Path -LiteralPath $TargetPath)
+    if ($newFile) { $targetBook = $excel.Workbooks.Add() }
+    else { $targetBook = $excel.Workbooks.Open($TargetPath, 0, $false) }
     $templateBook = $excel.Workbooks.Open($TemplatePath, 0, $true)
 
     $oldSheet = $null
     foreach ($candidate in @($targetBook.Worksheets)) {
-        $found = $candidate.Cells.Find($payload.marker)
-        if ($null -ne $found) { $oldSheet = $candidate; break }
+        foreach ($value in $candidate.Range("A1:GR10").Value2) {
+            if ([string]$value -ceq [string]$payload.marker) { $oldSheet = $candidate; break }
+        }
+        if ($null -ne $oldSheet) { break }
     }
     $oldName = $null
     $oldIndex = $null
     if ($null -ne $oldSheet) {
         $oldName = $oldSheet.Name
         $oldIndex = $oldSheet.Index
-        $oldSheet.Delete()
     }
 
     $sourceSheet = $templateBook.Worksheets.Item($TemplateSheet)
     $sourceSheet.Copy([Type]::Missing, $targetBook.Worksheets.Item($targetBook.Worksheets.Count))
     $sheet = $targetBook.ActiveSheet
+    if ($null -ne $oldSheet) { $oldSheet.Delete() }
+    if ($newFile) {
+        foreach ($blank in @($targetBook.Worksheets)) {
+            if ($blank.Name -ne $sheet.Name) { $blank.Delete() }
+        }
+    }
     if ($null -ne $oldIndex -and $oldIndex -le $targetBook.Worksheets.Count) {
         $sheet.Move($targetBook.Worksheets.Item($oldIndex))
         $sheet = $targetBook.Worksheets.Item($oldIndex)
@@ -191,7 +202,8 @@ try {
     $sheet.Range("G24").Formula = "=SUM(I14:I23)"
     $sheet.Range("D10").Formula = "=G24"
     $sheet.Range("I10").Formula = "=G24"
-    $targetBook.Save()
+    if ($newFile) { $targetBook.SaveAs($TargetPath, 51) }
+    else { $targetBook.Save() }
 }
 finally {
     if ($null -ne $templateBook) { $templateBook.Close($false) }
@@ -339,6 +351,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $excel = $null
 $workbook = $null
 $sheet = $null
@@ -355,11 +368,10 @@ try {
     )
 
     foreach ($candidate in @($workbook.Worksheets)) {
-        $found = $candidate.Cells.Find($Marker)
-        if ($null -ne $found) {
-            $sheet = $candidate
-            break
+        foreach ($value in $candidate.Range("A1:GR10").Value2) {
+            if ([string]$value -ceq $Marker) { $sheet = $candidate; break }
         }
+        if ($null -ne $sheet) { break }
     }
 
     if ($null -eq $sheet) {
@@ -1934,21 +1946,21 @@ def _export_customer_pdf_with_excel(
     pdf_path = customer_pdf_path(settings, draft)
 
     token = uuid.uuid4().hex
-    customer_xlsx = pdf_path.with_name(
-        f".{pdf_path.stem}.{token}.customer.xlsx"
-    )
+    # Excel cannot reliably open long paths. Keep its input and output short,
+    # then publish the finished PDF atomically beside the destination.
+    work_dir = tempfile.TemporaryDirectory(prefix="om-pdf-")
+    work_root = Path(work_dir.name)
+    customer_xlsx = work_root / "customer.xlsx"
+    excel_pdf = work_root / "customer.pdf"
     temp_pdf = pdf_path.with_name(
         f".{pdf_path.stem}.{token}.saving.pdf"
     )
-    script_path = pdf_path.with_name(
-        f".{pdf_path.stem}.{token}.pdf-export.ps1"
-    )
-    payload_path = pdf_path.with_name(
-        f".{pdf_path.stem}.{token}.customer.json"
-    )
+    script_path = work_root / "export.ps1"
+    payload_path = work_root / "customer.json"
 
     try:
         shutil.copy2(source_path, customer_xlsx)
+        _normalize_excel_text_whitespace(customer_xlsx)
 
         script_path.write_text(
             CUSTOMER_PDF_EXPORT_SCRIPT,
@@ -1989,7 +2001,7 @@ def _export_customer_pdf_with_excel(
                 "-SourcePath",
                 str(customer_xlsx),
                 "-PdfPath",
-                str(temp_pdf),
+                str(excel_pdf),
                 "-Marker",
                 f"{MAIL_MARKER_PREFIX}{mail.id}",
                 "-PayloadPath",
@@ -2001,6 +2013,7 @@ def _export_customer_pdf_with_excel(
             errors="replace",
             timeout=120,
             check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
 
         if result.returncode != 0:
@@ -2015,11 +2028,12 @@ def _export_customer_pdf_with_excel(
                 + detail
             )
 
-        if not temp_pdf.exists():
+        if not excel_pdf.exists():
             raise RuntimeError(
                 "Excel 변환은 종료됐지만 고객용 PDF 파일이 생성되지 않았습니다."
             )
 
+        shutil.copyfile(excel_pdf, temp_pdf)
         try:
             os.replace(temp_pdf, pdf_path)
         except PermissionError as error:
@@ -2035,6 +2049,7 @@ def _export_customer_pdf_with_excel(
         temp_pdf.unlink(missing_ok=True)
         script_path.unlink(missing_ok=True)
         payload_path.unlink(missing_ok=True)
+        work_dir.cleanup()
 
 
 def _export_customer_pdf(
@@ -2045,40 +2060,17 @@ def _export_customer_pdf(
     *,
     now: datetime | None = None,
 ) -> Path:
-    """Prefer exact Excel export, but work without Excel as well."""
-    excel_error: Exception | None = None
-
-    if sys.platform == "win32":
-        try:
-            return _export_customer_pdf_with_excel(
-                settings,
-                draft,
-                source_path,
-                mail,
-            )
-        except QuotationFileLockedError:
-            raise
-        except Exception as error:
-            excel_error = error
-
+    """Generate the customer PDF directly from the completed Excel quotation."""
     try:
-        return _export_customer_pdf_python(
-            settings,
-            draft,
-            source_path,
-            mail,
-            now=now,
-        )
-    except Exception as fallback_error:
-        if excel_error is not None:
-            raise RuntimeError(
-                "고객용 PDF 생성에 실패했습니다. "
-                "Excel 방식과 Python fallback이 모두 실패했습니다.\n"
-                f"Excel 오류: {excel_error}\n"
-                f"Python 오류: {fallback_error}"
-            ) from fallback_error
-
+        return _export_customer_pdf_with_excel(settings, draft, source_path, mail)
+    except QuotationFileLockedError:
         raise
+    except Exception as error:
+        raise RuntimeError(
+            "Excel 견적서에서 고객용 PDF를 생성하지 못했습니다. "
+            "서버 PC에 Microsoft Excel이 설치되어 있고 정상 실행되는지 확인해주세요.\n"
+            f"Excel 오류: {error}"
+        ) from error
 
 class QuotationFileLockedError(PermissionError):
     pass
@@ -2644,6 +2636,41 @@ def _requires_native_excel(path: Path) -> bool:
     )
 
 
+def _normalize_excel_text_whitespace(path: Path) -> bool:
+    """Preserve whitespace-only text runs in legacy openpyxl workbooks.
+
+    Excel rejects rich text line-break runs without xml:space="preserve".
+    Only patch XML on a working copy; do not round-trip sheets or drawings.
+    """
+    if not zipfile.is_zipfile(path):
+        return False
+    pattern = rb"<((?:[A-Za-z_][\w.-]*:)?t)>([ \t\r\n]+)</\1>"
+    changed: dict[str, bytes] = {}
+    normalized_path = path.with_name(f".{path.stem}.normalized.xlsx")
+    try:
+        with zipfile.ZipFile(path) as source:
+            for entry in source.infolist():
+                if not (entry.filename.endswith(".xml") and (
+                    entry.filename.startswith("xl/worksheets/")
+                    or entry.filename == "xl/sharedStrings.xml"
+                )):
+                    continue
+                data = source.read(entry.filename)
+                normalized = re.sub(pattern, rb'<\1 xml:space="preserve">\2</\1>', data)
+                if normalized != data:
+                    changed[entry.filename] = normalized
+            if not changed:
+                return False
+            with zipfile.ZipFile(normalized_path, "w") as output:
+                output.comment = source.comment
+                for entry in source.infolist():
+                    output.writestr(entry, changed.get(entry.filename, source.read(entry.filename)))
+        os.replace(normalized_path, path)
+        return True
+    finally:
+        normalized_path.unlink(missing_ok=True)
+
+
 def _save_with_native_excel(
     temp_path: Path,
     settings: Settings,
@@ -2655,9 +2682,12 @@ def _save_with_native_excel(
 ) -> None:
     if sys.platform != "win32":
         raise RuntimeError("복합 개체가 포함된 견적 파일은 Windows용 Microsoft Excel이 필요합니다.")
-    token = uuid.uuid4().hex
-    script_path = temp_path.with_name(f".{temp_path.stem}.{token}.excel-save.ps1")
-    payload_path = temp_path.with_name(f".{temp_path.stem}.{token}.excel-save.json")
+    work_dir = tempfile.TemporaryDirectory(prefix="om-xlsx-")
+    work_root = Path(work_dir.name)
+    native_target = work_root / "quotation.xlsx"
+    native_template = work_root / "template.xlsx"
+    script_path = work_root / "save.ps1"
+    payload_path = work_root / "values.json"
     payload = {
         "marker": f"{MAIL_MARKER_PREFIX}{mail.id}",
         "base_name": _sheet_base_name(mail, now),
@@ -2689,6 +2719,11 @@ def _save_with_native_excel(
         ],
     }
     try:
+        if temp_path.exists():
+            shutil.copyfile(temp_path, native_target)
+            _normalize_excel_text_whitespace(native_target)
+        shutil.copyfile(settings.quotation_template_path, native_template)
+        _normalize_excel_text_whitespace(native_template)
         script_path.write_text(EXCEL_COM_SCRIPT, encoding="utf-8-sig")
         payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8-sig")
         result = subprocess.run(
@@ -2701,9 +2736,9 @@ def _save_with_native_excel(
                 "-File",
                 str(script_path),
                 "-TargetPath",
-                str(temp_path),
+                str(native_target),
                 "-TemplatePath",
-                str(settings.quotation_template_path),
+                str(native_template),
                 "-TemplateSheet",
                 settings.quotation_template_sheet,
                 "-PayloadPath",
@@ -2715,15 +2750,18 @@ def _save_with_native_excel(
             errors="replace",
             timeout=120,
             check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "Microsoft Excel 자동화에 실패했습니다.").strip()
             raise RuntimeError(f"기존 견적 파일에 시트를 추가하지 못했습니다. Microsoft Excel을 확인해주세요.\n{detail}")
+        shutil.copyfile(native_target, temp_path)
     except FileNotFoundError as error:
         raise RuntimeError("복합 개체가 포함된 견적 파일을 처리하려면 Microsoft Excel과 PowerShell이 필요합니다.") from error
     finally:
         script_path.unlink(missing_ok=True)
         payload_path.unlink(missing_ok=True)
+        work_dir.cleanup()
 
 
 def _atomic_replace(temp_path: Path, target_path: Path) -> None:
@@ -2835,8 +2873,9 @@ def create_quotation(
         if existed:
             backup_path = _backup_path(target, now)
             shutil.copy2(target, backup_path)
-        if existed and _requires_native_excel(target):
-            shutil.copy2(target, temp_path)
+        if sys.platform == "win32":
+            if existed:
+                shutil.copy2(target, temp_path)
             _save_with_native_excel(temp_path, settings, mail, selected, total, complete, now)
         else:
             template_workbook = load_workbook(settings.quotation_template_path, rich_text=True)

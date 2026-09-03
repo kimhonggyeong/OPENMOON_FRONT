@@ -25,7 +25,7 @@ import {
   Upload,
   XCircle
 } from "lucide-react";
-import { api, syncEventsUrl } from "./api";
+import { api, syncEventsUrl, endConnection } from "./api";
 import type {
   AgentKnowledge,
   AgentMemory,
@@ -424,6 +424,12 @@ function loadUserProfile(): UserProfile {
   return profile;
 }
 function App() {
+  const [connectionEnded, setConnectionEnded] = useState(false);
+  useEffect(() => {
+    const ended = () => setConnectionEnded(true);
+    window.addEventListener("openmoon-disconnected", ended);
+    return () => window.removeEventListener("openmoon-disconnected", ended);
+  }, []);
   const [view, setView] = useState<ViewKey>("mail");
   const [mails, setMails] = useState<MailListItem[]>([]);
   const [userProfile] = useState<UserProfile>(loadUserProfile);
@@ -754,6 +760,12 @@ function App() {
     }
 
     const events = new EventSource(syncEventsUrl);
+    const closeConnection = () => {
+      stopped = true;
+      events.close();
+      sseConnectedRef.current = false;
+    };
+    window.addEventListener("openmoon-disconnected", closeConnection);
     events.onopen = () => {
       sseConnectedRef.current = true;
     };
@@ -761,6 +773,10 @@ function App() {
       try {
         if (stopped) return;
         const state = JSON.parse(event.data) as { revision: number; path?: string | null; type?: string; hearts?: Record<string, SharedHeartState> };
+        if (state.type === "disconnected") {
+          endConnection();
+          return;
+        }
         if (state.type === "hearts" && state.hearts) {
           heartUpdateVersionRef.current += 1;
           setHeartStates(state.hearts);
@@ -786,6 +802,7 @@ function App() {
 
     return () => {
       stopped = true;
+      window.removeEventListener("openmoon-disconnected", closeConnection);
       events.close();
       sseConnectedRef.current = false;
       window.clearInterval(timer);
@@ -1228,6 +1245,13 @@ function App() {
       setBulkAnalyzing(false);
     }
   }
+
+  if (connectionEnded) return (
+    <main style={{ padding: 64, textAlign: "center" }}>
+      <h1>서버 연결이 종료되었습니다.</h1>
+      <p>다시 사용하려면 실행 프로그램에서 서버에 연결한 뒤 ‘웹 열기’를 눌러 주세요.</p>
+    </main>
+  );
 
   return (
     <div className="app-shell sidebar-is-collapsed">

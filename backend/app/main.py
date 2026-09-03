@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
@@ -17,6 +18,7 @@ from .routers import agent, chat, data_admin, general_chat, imports, lan_hearts,
 from .sync_state import sync_state
 
 app_settings = get_settings()
+server_stopping = threading.Event()
 app = FastAPI(
     title=app_settings.app_name,
     version="0.1.0",
@@ -33,6 +35,8 @@ app.add_middleware(
 
 @app.middleware("http")
 async def publish_lan_changes(request: Request, call_next):
+    if server_stopping.is_set() and request.url.path.startswith("/api/") and request.method != "DELETE":
+        return JSONResponse(status_code=410, content={"detail": "서버 연결이 종료되었습니다."})
     response = await call_next(request)
     if (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
@@ -64,6 +68,7 @@ app.include_router(data_admin.router)
 
 @app.on_event("startup")
 def startup() -> None:
+    server_stopping.clear()
     init_db()
 
 
@@ -88,8 +93,11 @@ async def sync_events(request: Request):
             hearts = await run_in_threadpool(lan_hearts.store.all)
             yield f"data: {json.dumps({'type': 'hearts', 'hearts': hearts}, ensure_ascii=False)}\n\n"
             while not await request.is_disconnected():
+                if server_stopping.is_set():
+                    yield 'data: {"type":"disconnected"}\n\n'
+                    return
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=20)
+                    payload = await asyncio.wait_for(queue.get(), timeout=1)
                     if payload.get("type") == "hearts":
                         # Read current state at delivery time, including after queued changes.
                         payload = {"type": "hearts", "hearts": await run_in_threadpool(lan_hearts.store.all)}
