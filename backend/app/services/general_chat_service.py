@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import GeneralChatMessage
 from .agent_service import run_general_agent
 from .ai_provider import is_ai_configured
+
+# 전체 상담은 특정 메일에 묶여 자연스럽게 끊기는 메일별 채팅과 달리 하나의
+# 공용 대화라서 상한이 없으면 계속 쌓인다. LLM에는 이미 최근 8개만 넘기고
+# 있어서(agent_service.RECENT_CHAT_LIMIT) 그보다 훨씬 오래된 메시지는 답변
+# 품질에 도움이 되지 않으면서 목록 조회(GET /api/chat/general) 응답만
+# 계속 커지게 만든다. 최근 N개만 남기고 그보다 오래된 메시지는 지운다.
+GENERAL_CHAT_RETENTION_LIMIT = 200
+
+
+def _prune_general_chat(session: Session, keep: int = GENERAL_CHAT_RETENTION_LIMIT) -> None:
+    total = session.scalar(select(func.count()).select_from(GeneralChatMessage))
+    if not total or total <= keep:
+        return
+
+    cutoff_id = session.scalar(
+        select(GeneralChatMessage.id)
+        .order_by(GeneralChatMessage.id.desc())
+        .offset(keep - 1)
+        .limit(1)
+    )
+    if cutoff_id is None:
+        return
+
+    session.execute(delete(GeneralChatMessage).where(GeneralChatMessage.id < cutoff_id))
 
 
 def general_chat(
@@ -26,6 +51,10 @@ def general_chat(
 
     assistant = GeneralChatMessage(role="assistant", content=answer, evidence=evidence)
     session.add(assistant)
+    session.flush()
+
+    _prune_general_chat(session)
+
     session.commit()
     session.refresh(user)
     session.refresh(assistant)
