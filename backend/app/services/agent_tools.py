@@ -48,7 +48,10 @@ ATTACHMENT_VISION_PLACEHOLDER = "OpenAI 비전 분석에 반영됨"
 class AgentToolContext:
     session: Session
     settings: Settings
-    mail: Mail
+    # 메일과 무관한 일반 상담(run_general_agent)에서는 mail이 없다.
+    # 그 모드에서 실제 호출되는 Tool(search_company_knowledge/search_price_table/
+    # open_price_source/search_memory)은 mail을 참조하지 않으므로 안전하다.
+    mail: Mail | None = None
     user_message_id: int | None = None
     actions: list[dict[str, Any]] = field(default_factory=list)
     draft_updated: bool = False
@@ -316,6 +319,22 @@ OPENMOON_AGENT_TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+]
+
+# 메일/견적과 무관한 일반 상담 모드에서 쓸 수 있는 Tool만 추린 목록.
+# 품목을 조회/수정하는 Tool(get_current_quote, update_quote_item, add_quote_item,
+# replace_quote_items, delete_quote_item, create_quotation_draft, read_mail_attachments)과
+# 현재 메일 고객 기준으로 좁혀 검색하는 search_quotation_history/open_quotation_source,
+# remember_fact(메일 근거가 필요)는 제외한다.
+_GENERAL_AGENT_TOOL_NAMES = {
+    "search_company_knowledge",
+    "search_price_table",
+    "open_price_source",
+    "search_memory",
+}
+GENERAL_AGENT_TOOLS: list[dict[str, Any]] = [
+    tool for tool in OPENMOON_AGENT_TOOLS
+    if tool.get("name") in _GENERAL_AGENT_TOOL_NAMES
 ]
 
 
@@ -773,6 +792,41 @@ def _parse_update_value(field_name: str, value: str) -> Any:
     return value.strip()
 
 
+def _sync_existing_draft(ctx: AgentToolContext) -> bool:
+    """이미 생성된 견적서 Excel 파일이 있으면 현재 품목 기준으로 다시 써서 갱신한다.
+
+    update_quote_item뿐 아니라 add/replace/delete_quote_item으로 품목 구성 자체가
+    바뀐 경우에도 호출해야, 대화로 "이미 만든 견적서 바꿔줘"라고 요청했을 때 실제
+    파일이 최신 상태로 반영된다. 검토가 막혀 있거나(blocking) 필수값이 비어 있으면
+    건드리지 않는다.
+    """
+    existing = ctx.session.scalar(
+        select(QuotationDraft).where(QuotationDraft.mail_id == ctx.mail.id)
+    )
+    if existing is None or not Path(existing.file_path).exists():
+        return False
+
+    blocking = ctx.session.scalar(
+        select(ReviewIssue.id).where(
+            ReviewIssue.mail_id == ctx.mail.id,
+            ReviewIssue.resolved.is_(False),
+            ReviewIssue.severity == "blocking",
+        )
+    )
+    if blocking is not None or validate_quote_items(list(ctx.mail.items)):
+        return False
+
+    create_quotation(
+        ctx.session,
+        ctx.settings,
+        ctx.mail,
+        storage_mode="existing",
+        target_path=Path(existing.file_path),
+    )
+    ctx.draft_updated = True
+    return True
+
+
 def _update_quote_item(ctx: AgentToolContext, **arguments: Any) -> dict[str, Any]:
     item = _find_item(
         ctx,
@@ -823,29 +877,7 @@ def _update_quote_item(ctx: AgentToolContext, **arguments: Any) -> dict[str, Any
     )
     ctx.session.flush()
     evaluate_mail_readiness(ctx.session, ctx.settings, ctx.mail)
-
-    existing = ctx.session.scalar(select(QuotationDraft).where(QuotationDraft.mail_id == ctx.mail.id))
-    blocking = ctx.session.scalar(
-        select(ReviewIssue.id).where(
-            ReviewIssue.mail_id == ctx.mail.id,
-            ReviewIssue.resolved.is_(False),
-            ReviewIssue.severity == "blocking",
-        )
-    )
-    if (
-        existing is not None
-        and blocking is None
-        and not validate_quote_items(list(ctx.mail.items))
-        and Path(existing.file_path).exists()
-    ):
-        create_quotation(
-            ctx.session,
-            ctx.settings,
-            ctx.mail,
-            storage_mode="existing",
-            target_path=Path(existing.file_path),
-        )
-        ctx.draft_updated = True
+    draft_file_updated = _sync_existing_draft(ctx)
 
     action = {
         "source": "agent",
@@ -857,7 +889,12 @@ def _update_quote_item(ctx: AgentToolContext, **arguments: Any) -> dict[str, Any
         "new": new_value,
     }
     ctx.actions.append(action)
-    return {"updated": True, "action": action, "current_quote": _get_current_quote(ctx)}
+    return {
+        "updated": True,
+        "action": action,
+        "draft_file_updated": draft_file_updated,
+        "current_quote": _get_current_quote(ctx),
+    }
 
 
 def _new_mail_item(ctx: AgentToolContext, data: dict[str, Any], position: int) -> MailItem:
@@ -910,6 +947,7 @@ def _add_quote_item(ctx: AgentToolContext, **arguments: Any) -> dict[str, Any]:
     ctx.mail.items.append(item)
     ctx.session.flush()
     evaluate_mail_readiness(ctx.session, ctx.settings, ctx.mail)
+    draft_file_updated = _sync_existing_draft(ctx)
     action = {
         "source": "agent",
         "type": "item_added",
@@ -917,7 +955,12 @@ def _add_quote_item(ctx: AgentToolContext, **arguments: Any) -> dict[str, Any]:
         "product_name": item.product_name,
     }
     ctx.actions.append(action)
-    return {"added": True, "action": action, "current_quote": _get_current_quote(ctx)}
+    return {
+        "added": True,
+        "action": action,
+        "draft_file_updated": draft_file_updated,
+        "current_quote": _get_current_quote(ctx),
+    }
 
 
 def _replace_quote_items(ctx: AgentToolContext, *, items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -931,6 +974,7 @@ def _replace_quote_items(ctx: AgentToolContext, *, items: list[dict[str, Any]]) 
         ctx.mail.items.append(_new_mail_item(ctx, data, position))
     ctx.session.flush()
     evaluate_mail_readiness(ctx.session, ctx.settings, ctx.mail)
+    draft_file_updated = _sync_existing_draft(ctx)
     action = {
         "source": "agent",
         "type": "items_replaced",
@@ -938,7 +982,12 @@ def _replace_quote_items(ctx: AgentToolContext, *, items: list[dict[str, Any]]) 
         "products": [item.product_name for item in ctx.mail.items],
     }
     ctx.actions.append(action)
-    return {"replaced": True, "action": action, "current_quote": _get_current_quote(ctx)}
+    return {
+        "replaced": True,
+        "action": action,
+        "draft_file_updated": draft_file_updated,
+        "current_quote": _get_current_quote(ctx),
+    }
 
 
 def _delete_quote_item(
@@ -955,9 +1004,15 @@ def _delete_quote_item(
         remaining.position = position
     ctx.session.flush()
     evaluate_mail_readiness(ctx.session, ctx.settings, ctx.mail)
+    draft_file_updated = _sync_existing_draft(ctx)
     action = {"source": "agent", "type": "item_deleted", **deleted}
     ctx.actions.append(action)
-    return {"deleted": True, "action": action, "current_quote": _get_current_quote(ctx)}
+    return {
+        "deleted": True,
+        "action": action,
+        "draft_file_updated": draft_file_updated,
+        "current_quote": _get_current_quote(ctx),
+    }
 
 
 def _create_quotation_draft(ctx: AgentToolContext) -> dict[str, Any]:

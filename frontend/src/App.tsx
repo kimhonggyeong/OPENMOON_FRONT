@@ -31,6 +31,7 @@ import type {
   AgentMemory,
   ChatMessage,
   Draft,
+  GeneralChatMessage,
   HistoryCandidate,
   MailDetail,
   MailItem,
@@ -1729,6 +1730,7 @@ function QuotationStorageModal({ mail, onClose, onCreated }: {
 }
 
 function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { mail: MailDetail; refreshToken: number; onMailChanged: (mail: MailDetail) => void; onRequestQuotation: (mail: MailDetail) => void }) {
+  const [mode, setMode] = useState<"mail" | "general">("mail");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -1738,6 +1740,12 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
   const [expanded, setExpanded] = useState(false);
   const [quoteExpanded, setQuoteExpanded] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+
+  const [generalMessages, setGeneralMessages] = useState<GeneralChatMessage[]>([]);
+  const [generalText, setGeneralText] = useState("");
+  const [generalSending, setGeneralSending] = useState(false);
+  const [generalError, setGeneralError] = useState("");
+  const generalEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMessages([]);
@@ -1754,6 +1762,14 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    api.generalChatMessages().then(setGeneralMessages).catch((err) => setGeneralError(err instanceof Error ? err.message : String(err)));
+  }, [refreshToken]);
+
+  useEffect(() => {
+    if (mode === "general") generalEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [generalMessages, mode]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1785,6 +1801,23 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
       setChatError(err instanceof Error ? err.message : String(err));
     } finally {
       setSending(false);
+    }
+  }
+
+  async function sendGeneral() {
+    const message = generalText.trim();
+    if (!message || generalSending) return;
+    setGeneralText("");
+    setGeneralSending(true);
+    setGeneralError("");
+    try {
+      const result = await api.sendGeneralChat(message);
+      setGeneralMessages((current) => [...current, result.user_message, result.assistant_message]);
+    } catch (err) {
+      setGeneralText(message);
+      setGeneralError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGeneralSending(false);
     }
   }
 
@@ -1827,7 +1860,7 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
     return "확인 근거";
   }
 
-  function renderEvidence(message: ChatMessage) {
+  function renderEvidence(message: Pick<ChatMessage, "id" | "evidence">) {
     if (!message.evidence?.length) return null;
     return (
       <div className="agent-evidence-list">
@@ -1871,10 +1904,14 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
       <div className={`column-content chat-content ${expanded ? "agent-expanded" : ""}`}>
         <div className="panel-header sticky agent-header">
           <div className="agent-header-title">
-            <strong><MessageCircle size={17} /> 견적 에이전트</strong>
-            <span>회사 지식·기억·과거 견적·단가표</span>
+            <strong><MessageCircle size={17} /> {mode === "mail" ? "견적 에이전트" : "전체 상담"}</strong>
+            <span>{mode === "mail" ? "이 메일의 견적·회사 지식·기억·과거 견적·단가표" : "특정 메일과 무관한 제작·법률·트렌드 질문"}</span>
           </div>
           <div className="agent-header-actions">
+            <div className="agent-mode-toggle" role="tablist">
+              <button type="button" role="tab" aria-selected={mode === "mail"} className={mode === "mail" ? "active" : ""} onClick={() => setMode("mail")}>이 메일</button>
+              <button type="button" role="tab" aria-selected={mode === "general"} className={mode === "general" ? "active" : ""} onClick={() => setMode("general")}>전체</button>
+            </div>
             <button
               type="button"
               className="agent-toolbar-button"
@@ -1891,7 +1928,7 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
           </div>
         </div>
 
-        {!!mail.items.length && (
+        {mode === "mail" && !!mail.items.length && (
           <div className={`agent-quote-preview ${quoteExpanded ? "open" : "collapsed"}`}>
             <button type="button" className="agent-quote-summary" onClick={() => setQuoteExpanded((value) => !value)}>
               <span><strong>현재 견적</strong><small>{mail.items.length}개 품목</small></span>
@@ -1913,26 +1950,52 @@ function ChatPanel({ mail, refreshToken, onMailChanged, onRequestQuotation }: { 
           </div>
         )}
 
-        <div className="chat-messages">
-          {!messages.length && <div className="chat-empty"><MessageCircle size={28} /><p>견적, 과거 이력, 단가표, 재질을 질문하거나 변경을 요청해 보세요.</p></div>}
-          {messages.map((message) => (
-            <div key={message.id} className={`chat-message ${message.role}`}>
-              <div className="chat-message-body">{message.content}</div>
-              {message.role === "assistant" && renderEvidence(message)}
-              <time>{formatDate(message.created_at)}</time>
+        {mode === "mail" ? (
+          <>
+            <div className="chat-messages">
+              {!messages.length && <div className="chat-empty"><MessageCircle size={28} /><p>견적, 과거 이력, 단가표, 재질을 질문하거나 변경을 요청해 보세요.</p></div>}
+              {messages.map((message) => (
+                <div key={message.id} className={`chat-message ${message.role}`}>
+                  <div className="chat-message-body">{message.content}</div>
+                  {message.role === "assistant" && renderEvidence(message)}
+                  <time>{formatDate(message.created_at)}</time>
+                </div>
+              ))}
+              {sending && <div className="chat-message assistant pending"><Loader2 className="spin" size={16} /> 자료를 확인하고 있습니다.</div>}
+              <div ref={endRef} />
             </div>
-          ))}
-          {sending && <div className="chat-message assistant pending"><Loader2 className="spin" size={16} /> 자료를 확인하고 있습니다.</div>}
-          <div ref={endRef} />
-        </div>
 
-        {chatNotice && <div className="chat-notice"><CheckCircle2 size={14} />{chatNotice}</div>}
-        {chatError && <div className="chat-error">{chatError}</div>}
+            {chatNotice && <div className="chat-notice"><CheckCircle2 size={14} />{chatNotice}</div>}
+            {chatError && <div className="chat-error">{chatError}</div>}
 
-        <div className="chat-input">
-          <textarea value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="질문 또는 변경 명령 입력" />
-          <button className="button primary compact" onClick={() => void send()} disabled={sending || !text.trim()}>{sending ? <Loader2 className="spin" size={16} /> : <Send size={16} />} 전송</button>
-        </div>
+            <div className="chat-input">
+              <textarea value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="질문 또는 변경 명령 입력" />
+              <button className="button primary compact" onClick={() => void send()} disabled={sending || !text.trim()}>{sending ? <Loader2 className="spin" size={16} /> : <Send size={16} />} 전송</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="chat-messages">
+              {!generalMessages.length && <div className="chat-empty"><MessageCircle size={28} /><p>특정 메일과 무관하게 제작 시 고려사항, 법적으로 걸릴 만한 요소, 업계 트렌드 등을 자유롭게 물어보세요.</p></div>}
+              {generalMessages.map((message) => (
+                <div key={message.id} className={`chat-message ${message.role}`}>
+                  <div className="chat-message-body">{message.content}</div>
+                  {message.role === "assistant" && renderEvidence(message)}
+                  <time>{formatDate(message.created_at)}</time>
+                </div>
+              ))}
+              {generalSending && <div className="chat-message assistant pending"><Loader2 className="spin" size={16} /> 확인하고 있습니다.</div>}
+              <div ref={generalEndRef} />
+            </div>
+
+            {generalError && <div className="chat-error">{generalError}</div>}
+
+            <div className="chat-input">
+              <textarea value={generalText} onChange={(event) => setGeneralText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendGeneral(); } }} placeholder="특정 메일과 무관한 질문 입력" />
+              <button className="button primary compact" onClick={() => void sendGeneral()} disabled={generalSending || !generalText.trim()}>{generalSending ? <Loader2 className="spin" size={16} /> : <Send size={16} />} 전송</button>
+            </div>
+          </>
+        )}
       </div>
     </>
   );

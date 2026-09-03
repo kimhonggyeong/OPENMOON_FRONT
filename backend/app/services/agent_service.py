@@ -8,8 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import Settings
-from ..models import ChatMessage, Mail
-from .agent_tools import OPENMOON_AGENT_TOOLS, AgentToolContext, execute_agent_tool
+from ..models import ChatMessage, GeneralChatMessage, Mail
+from .agent_tools import (
+    GENERAL_AGENT_TOOLS,
+    OPENMOON_AGENT_TOOLS,
+    AgentToolContext,
+    execute_agent_tool,
+)
 from .conversation_summary_service import get_or_refresh_summary
 from .memory_service import memory_context_for_mail
 from .ai_provider import (
@@ -40,6 +45,9 @@ def _instructions(
 ) -> str:
     memory_text = json.dumps(memory_context, ensure_ascii=False, default=str)
     summary_text = conversation_summary or "없음"
+    product_summary = ", ".join(
+        dict.fromkeys(item.product_name for item in mail.items if item.product_name)
+    ) or "아직 확인된 품목 없음"
     return f"""
 당신은 디자인·인쇄 회사 '(주)열린문디자인'의 대화형 견적 업무 AI Agent입니다.
 
@@ -53,6 +61,19 @@ def _instructions(
 목표:
 사용자와 자연스럽게 대화하면서 현재 견적, 직원이 관리한 회사 지식, 고객별 장기기억,
 과거 견적, 현재 단가표를 필요한 순서대로 조회하고 실제 견적 업무를 보조합니다.
+
+답변 범위:
+- 이 Agent는 견적/제작/납품 업무를 돕는 전문가입니다. 날씨·안부·잡담처럼 이번 견적
+  업무와 무관한 질문에는 짧고 무난하게만 답하고, 곧바로 현재 진행 중인 견적으로
+  대화를 되돌리세요. 잡담에 깊이 관여하거나 개인적인 의견을 길게 늘어놓지 마세요.
+- 반대로 지금 담긴 품목의 제작·규격·시공·납품과 관련된 질문에는 회사 담당자 수준으로
+  구체적이고 적극적으로 답하세요. 사용자가 "더 고려할 게 없을까?" 처럼 열린 질문을
+  하면, 하나로만 답하지 말고 지금 메일에 담긴 품목({product_summary}) 기준으로
+  실무에서 자주 놓치는 점(예: 현수막이면 아일렛 위치·방수/내구성·시공 방식·계절/바람
+  하중·설치 장소별 유의점, 명함/배너류면 재단선·도련·코팅·인쇄면 등)을 먼저
+  search_company_knowledge(product_name, usage_context 지정)로 확인해서 답하세요.
+  내부 회사 지식에 없으면 일반적인 업계 지식임을 밝히고 조언하세요(근거 우선순위 3
+  참고). 사용자가 묻지 않은 것까지 먼저 짚어주는 것이 이 Agent의 핵심 가치입니다.
 
 근거 우선순위:
 1. 사용자가 현재 대화에서 명확히 말한 내용
@@ -74,6 +95,11 @@ def _instructions(
    명확히 실행을 요청한 경우에만 update_quote_item을 사용하세요.
 5. 규격/재질처럼 가격에 영향을 주는 값을 바꾼 뒤에는 이전 단가를 그대로 유지한다고 가정하지 마세요.
    시스템이 가격을 재평가하도록 하고, 필요하면 현재 가격 후보를 확인하세요.
+5-1. update_quote_item/add_quote_item/replace_quote_items/delete_quote_item으로 품목을 바꾸면,
+   이미 Excel 견적서 파일이 만들어져 있는 경우 그 파일도 자동으로 같은 내용으로 다시 저장됩니다
+   (별도 Tool 호출 불필요). Tool 결과의 draft_file_updated가 true이면 "이미 만든 견적서 파일에도
+   반영했습니다"라고 답하고, false인데 이미 만든 견적서가 있는 상황이면 검토 대기 항목이나
+   빈 필수값 때문에 파일까지는 반영되지 않았다는 점을 안내하세요.
 6. 단가 직접 변경은 기존 서버의 명시적 단가 명령 로직이 담당합니다. Agent Tool로 임의 단가를 확정하지 않습니다.
 7. remember_fact는 사용자가 명시한 장기 가치가 있는 고객 선호/회사 규칙/확정 사실에만 사용하세요.
    이번 주문의 수량 같은 일회성 값이나 AI 추론은 장기기억으로 저장하지 마세요.
@@ -106,6 +132,45 @@ def _instructions(
 """.strip()
 
 
+def _general_instructions(*, web_search_enabled: bool) -> str:
+    web_search_line = (
+        "4. 내부 자료에 없는 법률·트렌드·시사 질문은 web_search로 실제 최신 정보를 확인한 뒤 "
+        "답하고, 어디서 확인했는지 밝히세요."
+        if web_search_enabled
+        else "4. 이 연결에는 실시간 웹 검색이 없습니다. 내부 자료에 없는 최신 법률·트렌드 질문은 "
+        "일반적인 모델 지식 기준임을 밝히고, 확정 전 실제 확인이 필요하다고 안내하세요."
+    )
+    return f"""
+당신은 디자인·인쇄 회사 '(주)열린문디자인'의 업무 상담 AI Agent입니다.
+
+현재 상황:
+- 이 대화는 특정 메일이나 특정 견적에 묶여 있지 않습니다. 지금 열린 견적을 조회하거나
+  수정할 수 없고, 특정 고객의 과거 견적도 조회할 수 없습니다. 그런 요청이 오면 "특정 메일을
+  열고 그 메일의 견적 에이전트에게 물어봐 주세요"라고 안내하세요.
+
+목표:
+- 특정 견적과 무관하게 제작 전반(배너·현수막·명함 등 각 품목의 제작·시공·규격 고려사항),
+  법적으로 문제될 수 있는 요소(저작권/초상권, 옥외광고물 신고 등), 업계 트렌드처럼
+  "지금 뭘 만들고 있는데 뭘 더 고려해야 할지" 같은 자유로운 질문에 답하는 창구입니다.
+- 사용자가 묻지 않은 것까지 실무자 입장에서 먼저 짚어주는 것이 핵심 가치입니다. 하나로
+  뭉뚱그리지 말고 구체적인 체크리스트로 답하세요.
+- 이번 견적 업무와 무관한 잡담(날씨·안부 등)에는 짧고 무난하게만 답하세요.
+
+근거 우선순위:
+1. 직원이 직접 관리한 열린문디자인 회사 지식(search_company_knowledge)
+2. 회사 전반 장기기억(search_memory)
+3. 현재 단가표(search_price_table, open_price_source)
+{web_search_line}
+5. 일반적인 모델 지식(법률 자문이 아니라 참고용 안내임을 밝힐 것)
+
+작업 규칙:
+1. 열린문디자인의 실제 가격, 회사 규칙을 추측하지 마세요. 반드시 Tool로 확인하세요.
+2. 법률 관련 질문에는 최종 판단은 실제 법률 자문/관할 기관 확인이 필요하다는 점을 짧게
+   덧붙이세요. 다만 실무자가 바로 참고할 수 있는 구체적인 방향은 회피하지 말고 제시하세요.
+3. 답변은 한국어로, 업무 화면에서 빠르게 읽을 수 있게 짧고 명확하게 작성하세요.
+""".strip()
+
+
 def _recent_chat_input(
     session: Session,
     mail_id: int,
@@ -124,19 +189,35 @@ def _recent_chat_input(
     ]
 
 
+def _recent_general_chat_input(
+    session: Session,
+    limit: int = RECENT_CHAT_LIMIT,
+) -> list[dict[str, str]]:
+    rows = session.scalars(
+        select(GeneralChatMessage)
+        .order_by(GeneralChatMessage.id.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {"role": row.role, "content": row.content}
+        for row in reversed(rows)
+        if row.role in {"user", "assistant"}
+    ]
+
+
 def _compact_tool_output(result: dict[str, Any]) -> str:
     raw = json.dumps(result, ensure_ascii=False, default=str)
     return raw if len(raw) <= MAX_TOOL_OUTPUT_CHARS else raw[:MAX_TOOL_OUTPUT_CHARS] + "...(일부 생략)"
 
 
-def _anthropic_tools() -> list[dict[str, Any]]:
+def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "name": tool["name"],
             "description": tool.get("description", ""),
             "input_schema": tool.get("parameters", {"type": "object", "properties": {}}),
         }
-        for tool in OPENMOON_AGENT_TOOLS
+        for tool in tools
         if tool.get("type") == "function"
     ]
 
@@ -146,16 +227,22 @@ def _run_openai_agent(
     input_items: list[Any],
     instructions: str,
     tool_context: AgentToolContext,
+    *,
+    tools: list[dict[str, Any]],
+    web_search_enabled: bool = False,
 ) -> AgentResult:
     client = create_openai_client(settings)
     evidence: list[dict[str, Any]] = []
+    # OpenAI 호스팅 web_search 도구는 우리가 execute_agent_tool로 실행하지 않는다.
+    # 모델이 호출하면 OpenAI 서버가 검색을 수행하고 결과를 그대로 답변에 반영한다.
+    request_tools = [*tools, {"type": "web_search"}] if web_search_enabled else tools
 
     for _ in range(MAX_AGENT_STEPS):
         response = client.responses.create(
             model=settings.openai_model,
             instructions=instructions,
             input=input_items,
-            tools=OPENMOON_AGENT_TOOLS,
+            tools=request_tools,
         )
         input_items.extend(response.output)
         tool_calls = [item for item in response.output if getattr(item, "type", None) == "function_call"]
@@ -188,6 +275,8 @@ def _run_anthropic_agent(
     messages: list[Any],
     instructions: str,
     tool_context: AgentToolContext,
+    *,
+    tools: list[dict[str, Any]],
 ) -> AgentResult:
     client = create_anthropic_client(settings)
     evidence: list[dict[str, Any]] = []
@@ -198,7 +287,7 @@ def _run_anthropic_agent(
             max_tokens=settings.anthropic_max_tokens,
             system=instructions,
             messages=messages,
-            tools=_anthropic_tools(),
+            tools=_anthropic_tools(tools),
         )
         tool_calls = [block for block in response.content if getattr(block, "type", None) == "tool_use"]
         if not tool_calls:
@@ -298,5 +387,49 @@ def run_agent(
     )
     instructions = _instructions(mail, memory_context, conversation_summary)
     if settings.llm_provider == "anthropic":
-        return _run_anthropic_agent(settings, input_items, instructions, tool_context)
-    return _run_openai_agent(settings, input_items, instructions, tool_context)
+        return _run_anthropic_agent(
+            settings, input_items, instructions, tool_context, tools=OPENMOON_AGENT_TOOLS
+        )
+    return _run_openai_agent(
+        settings, input_items, instructions, tool_context, tools=OPENMOON_AGENT_TOOLS
+    )
+
+
+def run_general_agent(
+    session: Session,
+    settings: Settings,
+    text: str,
+    *,
+    user_message_id: int | None = None,
+) -> AgentResult:
+    """특정 메일/견적과 무관한 일반 상담(제작 전반·법률·트렌드 질문 등)을 처리한다."""
+    if not is_ai_configured(settings):
+        raise RuntimeError("선택된 AI 공급자의 API 키 또는 패키지가 없어 Agent 모드를 사용할 수 없습니다.")
+
+    input_items: list[Any] = _recent_general_chat_input(session, limit=RECENT_CHAT_LIMIT)
+    if not input_items or input_items[-1].get("role") != "user":
+        input_items.append({"role": "user", "content": text})
+
+    tool_context = AgentToolContext(
+        session=session,
+        settings=settings,
+        user_message_id=user_message_id,
+    )
+
+    # web_search는 지금 OpenAI Responses API 경로에서만 확인/연결했다.
+    # Anthropic으로 전환해 쓰는 경우엔 별도 웹 검색 도구 연동이 필요하다.
+    web_search_enabled = settings.llm_provider != "anthropic"
+    instructions = _general_instructions(web_search_enabled=web_search_enabled)
+
+    if settings.llm_provider == "anthropic":
+        return _run_anthropic_agent(
+            settings, input_items, instructions, tool_context, tools=GENERAL_AGENT_TOOLS
+        )
+    return _run_openai_agent(
+        settings,
+        input_items,
+        instructions,
+        tool_context,
+        tools=GENERAL_AGENT_TOOLS,
+        web_search_enabled=web_search_enabled,
+    )

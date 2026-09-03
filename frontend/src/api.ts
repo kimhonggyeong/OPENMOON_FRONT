@@ -4,6 +4,8 @@ import type {
   ChatMessage,
   ChatResponse,
   Draft,
+  GeneralChatMessage,
+  GeneralChatResponse,
   HistoryCandidate,
   MailDetail,
   MailListItem,
@@ -96,6 +98,12 @@ export const api = {
   chatMessages: (id: number) => request<ChatMessage[]>(`/mails/${id}/chat`),
   sendChat: (id: number, message: string) =>
     request<ChatResponse>(`/mails/${id}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message })
+    }),
+  generalChatMessages: () => request<GeneralChatMessage[]>("/chat/general"),
+  sendGeneralChat: (message: string) =>
+    request<GeneralChatResponse>("/chat/general", {
       method: "POST",
       body: JSON.stringify({ message })
     }),

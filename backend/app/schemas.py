@@ -560,3 +560,20 @@ class ChatResponse(BaseModel):
     assistant_message: ChatMessageOut
     mail: MailDetailOut
     draft_updated: bool = False
+
+
+class GeneralChatMessageOut(ORMModel):
+    id: int
+    role: str
+    content: str
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+
+
+class GeneralChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class GeneralChatResponse(BaseModel):
+    user_message: GeneralChatMessageOut
+    assistant_message: GeneralChatMessageOut

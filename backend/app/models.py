@@ -352,6 +352,17 @@ class ChatMessage(TimestampMixin, Base):
     mail: Mapped[Mail] = relationship(back_populates="chat_messages")
 
 
+class GeneralChatMessage(TimestampMixin, Base):
+    """특정 메일/견적과 무관한 자유 상담 대화(제작 전반·법적 이슈·트렌드 질문 등)."""
+
+    __tablename__ = "general_chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+
+
 class QuotationLearningFact(TimestampMixin, Base):
     """사람이 대화/화면에서 확정한 견적 판단 사례와 변경 전후 값."""
 

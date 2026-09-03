@@ -371,6 +371,31 @@ td { padding:8px 10px; border-bottom:1px solid #eeeae3; color:#40454a; max-width
 .agent-toolbar-button:hover{background:#fff0e4}
 .agent-toolbar-button:disabled{opacity:.5;cursor:not-allowed}
 
+.agent-mode-toggle{
+  display:inline-flex;
+  border:1px solid #e2ddd3;
+  border-radius:8px;
+  padding:2px;
+  background:#f6f3ee;
+  flex:none;
+}
+.agent-mode-toggle button{
+  border:0;
+  background:transparent;
+  color:#8a8478;
+  height:26px;
+  padding:0 10px;
+  border-radius:6px;
+  font-size:9px;
+  font-weight:700;
+  cursor:pointer;
+}
+.agent-mode-toggle button.active{
+  background:#fff;
+  color:#a45327;
+  box-shadow:0 1px 2px rgba(0,0,0,.08);
+}
+
 .agent-quote-preview.collapsed{
   margin:7px 10px 4px;
   border-radius:8px;

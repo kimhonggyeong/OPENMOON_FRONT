@@ -269,6 +269,19 @@ export interface ChatResponse {
   draft_updated: boolean;
 }
 
+export interface GeneralChatMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  evidence: AgentEvidence[];
+  created_at: string;
+}
+
+export interface GeneralChatResponse {
+  user_message: GeneralChatMessage;
+  assistant_message: GeneralChatMessage;
+}
+
 export interface ProductCatalogField {
   key: string;
   label: string;
