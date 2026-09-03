@@ -46,6 +46,26 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  prepareDraftDownload: async (draftId: number, format: "excel" | "pdf", fallbackName: string) => {
+    if (connectionEnded) throw new Error("서버 연결이 종료되었습니다.");
+    const route = format === "excel" ? "file" : "customer-pdf";
+    const response = await fetch(`${API}/quotations/${draftId}/${route}`, {
+      headers: { "X-Openmoon-User": sessionUser }
+    });
+    if (response.status === 410) endConnection();
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || "견적서 파일을 내려받지 못했습니다.");
+    }
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+    const plainName = /filename="([^"]+)"/i.exec(disposition)?.[1];
+    let filename = plainName || fallbackName;
+    if (encodedName) {
+      try { filename = decodeURIComponent(encodedName); } catch { /* 기본 파일명 사용 */ }
+    }
+    return { blob: await response.blob(), filename };
+  },
   syncState: () => request<{
     revision: number;
     changed_at?: string | null;

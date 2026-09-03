@@ -72,7 +72,10 @@ def _forward(
         with urllib.request.urlopen(request, timeout=5 if path.rstrip("/") == "api/lan-presence" else 120) as remote:
             data = remote.read()
             content_type = remote.headers.get("Content-Type", "application/octet-stream")
-            return Response(data, status_code=remote.status, media_type=content_type.split(";", 1)[0])
+            response_headers = {}
+            if disposition := remote.headers.get("Content-Disposition"):
+                response_headers["Content-Disposition"] = disposition
+            return Response(data, status_code=remote.status, media_type=content_type.split(";", 1)[0], headers=response_headers)
     except urllib.error.HTTPError as error:
         return Response(error.read(), status_code=error.code, media_type=error.headers.get_content_type())
     except (OSError, urllib.error.URLError) as error:

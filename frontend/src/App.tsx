@@ -3012,6 +3012,47 @@ function HistoryAndPricing({ companyHistory, history, prices }: { companyHistory
 }
 
 function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () => Promise<void>; runAction: (action: () => Promise<unknown>, success: string, refresh?: boolean) => Promise<void> }) {
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const downloadBusy = useRef(false);
+
+  async function downloadDraft(draft: Draft, format: "excel" | "pdf") {
+    if (downloadBusy.current) return;
+    downloadBusy.current = true;
+    setDownloading(`${draft.id}-${format}`);
+    try {
+      const sourceName = draft.file_path.split(/[\\/]/).pop() || "견적서.xlsx";
+      const fallbackName = format === "pdf" ? sourceName.replace(/\.[^.]+$/, ".pdf") : sourceName;
+      const { blob, filename } = await api.prepareDraftDownload(draft.id, format, fallbackName);
+      const extension = /\.[^.]+$/.exec(filename)?.[0] || (format === "pdf" ? ".pdf" : ".xlsx");
+      let entered = filename;
+      while (true) {
+        const value = window.prompt("저장할 파일 이름을 입력해주세요.", entered);
+        if (value === null) return;
+        entered = value.trim();
+        const name = entered.toLowerCase().endsWith(extension.toLowerCase()) ? entered : `${entered}${extension}`;
+        const stem = name.slice(0, -extension.length);
+        if (!stem.trim() || /[<>:"/\\|?*\x00-\x1F]/.test(name) || /[. ]$/.test(stem) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)) {
+          window.alert("사용할 수 없는 파일 이름입니다. 이름을 입력하고 특수문자(\\ / : * ? \" < > |)는 제외해주세요.");
+          continue;
+        }
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+        return;
+      }
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "파일 다운로드에 실패했습니다.");
+    } finally {
+      downloadBusy.current = false;
+      setDownloading(null);
+    }
+  }
+
   const [employees, setEmployees] = useState<Record<number, string>>({});
   const [reviewDraftId, setReviewDraftId] = useState<number | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -3161,8 +3202,8 @@ function DraftView({ drafts, reload, runAction }: { drafts: Draft[]; reload: () 
             <strong>{money(draft.total_amount)}</strong>
             <div className="draft-mail-summary"><small>발송 제목</small><span>{draft.email_subject || "제목 없음"}</span></div>
             <div className="draft-actions">
-              <a className="button secondary compact" href={`/api/quotations/${draft.id}/file`}><FileDown size={16} /> Excel</a>
-              <a className="button secondary compact" href={`/api/quotations/${draft.id}/customer-pdf`} target="_blank" rel="noreferrer"><FileDown size={16} /> PDF</a>
+              <button className="button secondary compact" disabled={downloading !== null} onClick={() => void downloadDraft(draft, "excel")}>{downloading === `${draft.id}-excel` ? <Loader2 className="spin" size={16} /> : <FileDown size={16} />} Excel</button>
+              <button className="button secondary compact" disabled={downloading !== null} onClick={() => void downloadDraft(draft, "pdf")}>{downloading === `${draft.id}-pdf` ? <Loader2 className="spin" size={16} /> : <FileDown size={16} />} PDF</button>
               {draft.status !== "SENT" && <button className="button primary compact" onClick={() => void openReview(draft)}><MailCheck size={16} /> {draft.status === "FAILED" || draft.status === "APPROVED" ? "재발송 검토" : "발송 전 검토"}</button>}
               <button className="button danger compact" onClick={() => { if (window.confirm("이 견적서를 삭제할까요?")) void runAction(() => api.deleteDraft(draft.id), "견적서를 삭제했습니다.", false).then(reload); }}><Trash2 size={16} /> 삭제</button>
             </div>

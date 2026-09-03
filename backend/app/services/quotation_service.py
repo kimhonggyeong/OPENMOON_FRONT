@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import re
 import shutil
@@ -52,6 +53,25 @@ EXCEL_COM_SCRIPT = r'''
 param([string]$TargetPath, [string]$TemplatePath, [string]$TemplateSheet, [string]$PayloadPath)
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+function Invoke-ExcelCall([scriptblock]$Action) {
+    for ($attempt = 0; ; $attempt++) {
+        try { return (& $Action) }
+        catch {
+            $exception = $_.Exception
+            $rejected = $false
+            while ($null -ne $exception) {
+                if ($exception.HResult -in @(-2147418111, -2147417846)) { $rejected = $true }
+                $exception = $exception.InnerException
+            }
+            if (-not $rejected -or $attempt -ge 20) { throw }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+function Invoke-ExcelCleanup([string]$Label, [scriptblock]$Action) {
+    try { Invoke-ExcelCall $Action | Out-Null }
+    catch { [Console]::Error.WriteLine("Excel cleanup warning [{0}]: {1}", $Label, $_.Exception.Message) }
+}
 function Set-ExcelValue($Range, $Value) {
     if ($null -eq $Value) { $Range.ClearContents(); return }
     if ($Value -is [byte] -or $Value -is [int16] -or $Value -is [int32] -or $Value -is [int64] -or $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) {
@@ -64,15 +84,22 @@ function Set-ExcelValue($Range, $Value) {
 $excel = $null
 $targetBook = $null
 $templateBook = $null
+$sourceSheet = $null
+$sheet = $null
+$stage = "Excel 시작"
 try {
     $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
+    $excel.EnableEvents = $false
+    $stage = "견적 파일 열기"
     $newFile = -not (Test-Path -LiteralPath $TargetPath)
-    if ($newFile) { $targetBook = $excel.Workbooks.Add() }
-    else { $targetBook = $excel.Workbooks.Open($TargetPath, 0, $false) }
-    $templateBook = $excel.Workbooks.Open($TemplatePath, 0, $true)
+    if ($newFile) { $targetBook = Invoke-ExcelCall { $excel.Workbooks.Add() } }
+    else { $targetBook = Invoke-ExcelCall { $excel.Workbooks.Open($TargetPath, 0, $false) } }
+    $stage = "템플릿 열기"
+    $templateBook = Invoke-ExcelCall { $excel.Workbooks.Open($TemplatePath, 0, $true) }
+    $stage = "견적 시트 추가"
 
     $oldSheet = $null
     foreach ($candidate in @($targetBook.Worksheets)) {
@@ -89,7 +116,8 @@ try {
     }
 
     $sourceSheet = $templateBook.Worksheets.Item($TemplateSheet)
-    $sourceSheet.Copy([Type]::Missing, $targetBook.Worksheets.Item($targetBook.Worksheets.Count))
+    $lastSheet = $targetBook.Worksheets.Item($targetBook.Worksheets.Count)
+    Invoke-ExcelCall { $sourceSheet.Copy([Type]::Missing, $lastSheet) }
     $sheet = $targetBook.ActiveSheet
     if ($null -ne $oldSheet) { $oldSheet.Delete() }
     if ($newFile) {
@@ -119,6 +147,7 @@ try {
         }
     }
     $sheet.Name = $name
+    $stage = "견적 내용 입력"
 
     foreach ($entry in $payload.cells.PSObject.Properties) {
         $range = $sheet.Range($entry.Name)
@@ -202,18 +231,24 @@ try {
     $sheet.Range("G24").Formula = "=SUM(I14:I23)"
     $sheet.Range("D10").Formula = "=G24"
     $sheet.Range("I10").Formula = "=G24"
-    if ($newFile) { $targetBook.SaveAs($TargetPath, 51) }
-    else { $targetBook.Save() }
+    $stage = "견적 파일 저장"
+    if ($newFile) { Invoke-ExcelCall { $targetBook.SaveAs($TargetPath, 51) } }
+    else { Invoke-ExcelCall { $targetBook.Save() } }
+    $stage = "저장 결과 기록"
+    @{ sheet = $name; marker = [string]$payload.marker } | ConvertTo-Json | Set-Content -LiteralPath ($TargetPath + ".saved.json") -Encoding UTF8
+}
+catch {
+    throw "[$stage] $($_.Exception.Message)"
 }
 finally {
-    if ($null -ne $templateBook) { $templateBook.Close($false) }
-    if ($null -ne $targetBook) { $targetBook.Close($false) }
-    if ($null -ne $excel) { $excel.Quit() }
-    if ($null -ne $sourceSheet) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sourceSheet) }
-    if ($null -ne $sheet) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sheet) }
-    if ($null -ne $templateBook) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($templateBook) }
-    if ($null -ne $targetBook) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($targetBook) }
-    if ($null -ne $excel) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel) }
+    if ($null -ne $templateBook) { Invoke-ExcelCleanup "템플릿 닫기" { $templateBook.Close($false) } }
+    if ($null -ne $targetBook) { Invoke-ExcelCleanup "견적 파일 닫기" { $targetBook.Close($false) } }
+    if ($null -ne $excel) { Invoke-ExcelCleanup "Excel 종료" { $excel.Quit() } }
+    foreach ($comObject in @($sourceSheet, $sheet, $lastSheet, $templateBook, $targetBook, $excel)) {
+        if ($null -ne $comObject) {
+            Invoke-ExcelCleanup "Excel 참조 해제" { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($comObject) }
+        }
+    }
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
 }
@@ -2671,6 +2706,25 @@ def _normalize_excel_text_whitespace(path: Path) -> bool:
         normalized_path.unlink(missing_ok=True)
 
 
+def _verify_native_excel_save(path: Path, expected_marker: str) -> None:
+    """Inspect the saved workbook without rewriting its drawings or rich text."""
+    try:
+        receipt = json.loads(Path(str(path) + ".saved.json").read_text(encoding="utf-8-sig"))
+        if receipt["marker"] != expected_marker:
+            raise ValueError("저장된 견적 식별정보가 일치하지 않습니다.")
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None:
+                raise ValueError("저장된 Excel 파일이 손상되었습니다.")
+        workbook = load_workbook(path, read_only=True, data_only=False)
+        try:
+            if workbook[receipt["sheet"]]["T1"].value != expected_marker:
+                raise ValueError("저장된 견적 시트를 확인할 수 없습니다.")
+        finally:
+            workbook.close()
+    except Exception as error:
+        raise RuntimeError(f"[저장 결과 확인] 견적 파일 검증에 실패했습니다: {error}") from error
+
+
 def _save_with_native_excel(
     temp_path: Path,
     settings: Settings,
@@ -2754,14 +2808,20 @@ def _save_with_native_excel(
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "Microsoft Excel 자동화에 실패했습니다.").strip()
-            raise RuntimeError(f"기존 견적 파일에 시트를 추가하지 못했습니다. Microsoft Excel을 확인해주세요.\n{detail}")
+            raise RuntimeError(f"Excel 견적 처리에 실패했습니다.\n{detail}")
+        _verify_native_excel_save(native_target, payload["marker"])
+        if result.stderr.strip():
+            logging.getLogger(__name__).warning("Excel saved successfully; cleanup details: %s", result.stderr.strip())
         shutil.copyfile(native_target, temp_path)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("[Excel 응답 대기] 제한 시간을 초과했습니다. Excel의 열린 안내창을 확인해주세요.") from error
     except FileNotFoundError as error:
         raise RuntimeError("복합 개체가 포함된 견적 파일을 처리하려면 Microsoft Excel과 PowerShell이 필요합니다.") from error
     finally:
-        script_path.unlink(missing_ok=True)
-        payload_path.unlink(missing_ok=True)
-        work_dir.cleanup()
+        try:
+            work_dir.cleanup()
+        except OSError:
+            logging.getLogger(__name__).warning("Excel temporary files remain locked: %s", work_root, exc_info=True)
 
 
 def _atomic_replace(temp_path: Path, target_path: Path) -> None:

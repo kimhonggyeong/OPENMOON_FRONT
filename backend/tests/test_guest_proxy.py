@@ -1,6 +1,24 @@
 from backend.app import guest_proxy
 
 
+def test_download_keeps_original_filename_for_guest(monkeypatch):
+    from io import BytesIO
+    from urllib.parse import quote
+
+    filename = "경남 견적서 고객용.pdf"
+    disposition = f"attachment; filename*=utf-8''{quote(filename)}"
+
+    class Remote(BytesIO):
+        status = 200
+        headers = {"Content-Type": "application/pdf", "Content-Disposition": disposition}
+
+    monkeypatch.setattr(guest_proxy.urllib.request, "urlopen", lambda *args, **kwargs: Remote(b"pdf-content"))
+    monkeypatch.setattr(guest_proxy, "_upstream", "http://unused")
+    response = guest_proxy._forward("GET", "api/quotations/1/customer-pdf", "", b"", [])
+    assert response.headers["content-disposition"] == disposition
+    assert response.body == b"pdf-content"
+
+
 def test_stopped_and_previous_session_requests_are_rejected(monkeypatch):
     from fastapi.testclient import TestClient
     from fastapi.responses import Response
