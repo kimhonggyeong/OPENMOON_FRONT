@@ -10,6 +10,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from ..models import Mail, QuotationDraft
+from ..quotation_storage import storage_operation
 from .external_price_engine import extract_dimensions, normalize_product_name
 
 
@@ -43,6 +44,7 @@ def _sheet_name(path: Path, mail_id: int) -> str:
         workbook.close()
 
 
+@storage_operation
 def sync_draft_to_history(database_path: Path, draft: QuotationDraft, mail: Mail) -> dict[str, Any]:
     path = Path(draft.file_path).resolve()
     if not path.exists():
@@ -81,6 +83,7 @@ def sync_draft_to_history(database_path: Path, draft: QuotationDraft, mail: Mail
         db.close()
 
 
+@storage_operation
 def remove_draft_from_history(database_path: Path, draft_id: int) -> int:
     if not database_path.exists():
         return 0

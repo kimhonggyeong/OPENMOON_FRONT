@@ -1733,6 +1733,7 @@ function QuotationStorageModal({ mail, onClose, onCreated }: {
               {modes.map((row) => <button key={row.key} className={mode === row.key ? "storage-mode active" : "storage-mode"} onClick={() => chooseMode(row.key)}>{row.label}</button>)}
             </div>
             <div className="storage-root"><span>견적 폴더</span><strong>{options?.root_path}</strong></div>
+            {options?.storage_notice && <div className="quote-modal-error">{options.storage_notice}</div>}
             <div className="storage-files">
               {rows.map((row) => (
                 <button key={`${row.mode}-${row.path}`} className={selected?.path === row.path ? "storage-file selected" : "storage-file"} onClick={() => setSelected(row)}>
@@ -1741,7 +1742,7 @@ function QuotationStorageModal({ mail, onClose, onCreated }: {
                   <span className="storage-file-meta"><b>{row.file_type}</b><em>{row.exists ? "기존 파일" : "새로 생성"}</em></span>
                 </button>
               ))}
-              {!rows.length && <div className="storage-empty">관련 기존 파일이 없습니다. 부서 공용, 담당자별 또는 별도 파일 방식을 선택할 수 있습니다.</div>}
+              {!rows.length && <div className="storage-empty">{options?.storage_notice || "관련 기존 파일이 없습니다. 부서 공용, 담당자별 또는 별도 파일 방식을 선택할 수 있습니다."}</div>}
             </div>
             <div className="selected-storage"><span>선택된 파일</span><strong>{selected?.filename || "선택되지 않음"}</strong><small>{selected?.path || ""}</small></div>
           </>

@@ -312,6 +312,7 @@ def get_external_history_candidates(
     *,
     scope: str = "customer",
     limit: int = 100,
+    settings=None,
 ) -> list[dict[str, Any]]:
     """Read customer/company history directly from quotation_history.db.
 
@@ -406,6 +407,12 @@ def get_external_history_candidates(
             continue
         seen.add(key)
         result = dict(row)
+        if settings is not None:
+            from ..quotation_storage import selected_source_path
+            try:
+                result["source_file"] = str(selected_source_path(settings, result["source_file"]))
+            except OSError:
+                continue
         result["customer_name"] = (
             result.get("customer_name")
             or result.get("customer_organization")
@@ -422,6 +429,7 @@ def is_known_external_history_source(
     database_path: Path,
     source_file: str,
     source_sheet: str,
+    settings=None,
 ) -> bool:
     """Allow opening only file/sheet pairs already indexed in history DB."""
     if not database_path.exists():
@@ -438,6 +446,16 @@ def is_known_external_history_source(
             """,
             (source_file, source_sheet),
         ).fetchone()
-        return row is not None
+        if row is not None:
+            return True
+        if settings is not None:
+            from ..quotation_storage import selected_source_path
+            for (old_path,) in connection.execute("SELECT sf.file_path FROM source_files sf JOIN quotations q ON q.source_file_id=sf.id WHERE q.sheet_name=?", (source_sheet,)):
+                try:
+                    if selected_source_path(settings, old_path) == Path(source_file).resolve():
+                        return True
+                except OSError:
+                    continue
+        return False
     finally:
         connection.close()

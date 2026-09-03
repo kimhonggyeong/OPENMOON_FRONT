@@ -189,6 +189,7 @@ export interface QuotationStorageCandidate {
 
 export interface QuotationStorageOptions {
   root_path: string;
+  storage_notice?: string | null;
   selected_file?: string | null;
   existing_files: QuotationStorageCandidate[];
   new_files: QuotationStorageCandidate[];

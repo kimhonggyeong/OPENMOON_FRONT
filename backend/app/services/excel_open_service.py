@@ -15,8 +15,12 @@ def _ps_quote(value: str) -> str:
 def resolve_quotation_source_path(
     file_path: Path | str,
     quotation_files_root: Path | str,
+    settings=None,
 ) -> Path:
     """Resolve stale history paths against the configured quotation folder."""
+    if settings is not None:
+        from ..quotation_storage import selected_source_path
+        return selected_source_path(settings, file_path)
     original = Path(file_path).expanduser()
     if original.exists() and original.is_file():
         return original.resolve()

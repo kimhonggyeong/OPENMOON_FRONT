@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     )
 
     quotation_history_dir: str = ""
+    quotation_year_folders: dict[str, str] = Field(default_factory=dict)
+    quotation_path_aliases: dict[str, str] = Field(default_factory=dict)
 
     # =====================================================
     # 새 가격 엔진용 SQLite DB
@@ -206,6 +208,8 @@ class Settings(BaseSettings):
     @field_validator("quotation_files_path", mode="before")
     @classmethod
     def resolve_quotation_files_path(cls, value: str | Path) -> Path:
+        if Path(value).is_absolute():
+            return Path(value)
         return runtime_data_path(value)
 
     # =====================================================
@@ -318,6 +322,8 @@ def get_settings() -> Settings:
     settings = Settings()
 
     settings.ensure_directories()
+    from .quotation_storage import load_storage
+    load_storage(settings)
 
     if settings.openai_api_key:
         os.environ.setdefault(

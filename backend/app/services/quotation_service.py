@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import PROJECT_ROOT, Settings
+from ..quotation_storage import storage_operation, year_root, relocated_path
 from ..enums import DraftStatus, MailStatus
 from ..models import Mail, QuotationDraft, QuotationDraftItem
 from .price_engine_adapter import calculate_item_price
@@ -2175,7 +2176,7 @@ def _customer_parts(mail: Mail) -> tuple[str, str, str]:
 
 
 def _new_file_candidates(settings: Settings, mail: Mail, now: datetime) -> list[dict[str, Any]]:
-    root = settings.quotation_files_path.resolve()
+    root = year_root(settings, now.year).resolve()
     company, department, person = _customer_parts(mail)
     year = now.strftime("%y")
     date = now.strftime("%Y%m%d")
@@ -2200,6 +2201,7 @@ def _new_file_candidates(settings: Settings, mail: Mail, now: datetime) -> list[
     ]
 
 
+@storage_operation
 def get_storage_options(
     settings: Settings,
     mail: Mail,
@@ -2208,15 +2210,23 @@ def get_storage_options(
 ) -> dict[str, Any]:
     now = now or datetime.now()
     root = settings.quotation_files_path.resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    if not root.is_dir():
+        raise ValueError(f"견적서 저장소에 연결할 수 없습니다: {root}")
     company, department, person = _customer_parts(mail)
     company_key = _normalized(company)
     department_key = _normalized(department)
     person_key = _normalized(person)
     existing: list[tuple[int, dict[str, Any]]] = []
 
-    for path in root.glob("*.xlsx"):
+    years = getattr(settings, "quotation_year_folders", {})
+    search_roots = [root / folder for folder in years.values()] if years else [root]
+    for search_root in search_roots:
+        if not search_root.is_dir():
+            raise ValueError(f"견적서 폴더에 연결할 수 없습니다: {search_root}")
+    for path in (path for search_root in search_roots for path in search_root.rglob("*.xlsx")):
         if path.name.startswith((".", "~$")):
+            continue
+        if not path.resolve().is_relative_to(root):
             continue
         stem_key = _normalized(path.stem)
         if company_key and company_key not in stem_key:
@@ -2245,14 +2255,25 @@ def get_storage_options(
             )
         )
 
-    existing.sort(key=lambda row: (-row[0], row[1]["filename"]))
+    current_folder = getattr(settings, "quotation_year_folders", {}).get(str(now.year))
+    existing.sort(key=lambda row: (
+        0 if current_folder and Path(row[1]["path"]).is_relative_to(root / current_folder) else 1,
+        -row[0], row[1]["filename"], row[1]["path"],
+    ))
     draft = getattr(mail, "drafts", None)
-    selected = str(Path(draft[-1].file_path).resolve()) if draft else None
+    selected = str(relocated_path(settings, draft[-1].file_path).resolve()) if draft else None
+    try:
+        new_files = _new_file_candidates(settings, mail, now)
+        storage_notice = None
+    except ValueError as error:
+        new_files = []
+        storage_notice = str(error)
     return {
         "root_path": str(root),
+        "storage_notice": storage_notice,
         "selected_file": selected,
         "existing_files": [row for _, row in existing],
-        "new_files": _new_file_candidates(settings, mail, now),
+        "new_files": new_files,
     }
 
 
@@ -2786,6 +2807,7 @@ def _atomic_replace(temp_path: Path, target_path: Path) -> None:
             ) from error
 
 
+@storage_operation
 def create_quotation(
     session: Session,
     settings: Settings,

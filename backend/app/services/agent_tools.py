@@ -715,6 +715,7 @@ def _search_quotation_history(
         ctx.mail,
         scope="company" if customer_name else "customer",
         limit=100,
+        settings=ctx.settings,
     )
     if customer_name:
         query = customer_name.strip().casefold()
@@ -748,6 +749,7 @@ def _open_quotation_source(
         ctx.settings.quotation_database_path,
         source_file,
         source_sheet,
+        settings=ctx.settings,
     )
     if not known:
         known = ctx.session.scalar(
@@ -761,6 +763,7 @@ def _open_quotation_source(
     resolved_source = resolve_quotation_source_path(
         source_file,
         ctx.settings.quotation_files_path,
+        settings=ctx.settings,
     )
     return open_excel_location(resolved_source, sheet=source_sheet)
 

@@ -67,9 +67,17 @@ app.include_router(data_admin.router)
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     server_stopping.clear()
     init_db()
+    from .services.history_refresh import start_history_refresh
+    start_history_refresh(app_settings, server_stopping)
+
+
+@app.get("/api/quotation-storage/history-status")
+def history_refresh_status():
+    from .services.history_refresh import refresh_status
+    return refresh_status()
 
 
 @app.get("/api/health")

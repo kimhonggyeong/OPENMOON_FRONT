@@ -437,6 +437,7 @@ class QuotationStorageCandidate(BaseModel):
 
 class QuotationStorageOptions(BaseModel):
     root_path: str
+    storage_notice: str | None = None
     selected_file: str | None = None
     existing_files: list[QuotationStorageCandidate] = Field(default_factory=list)
     new_files: list[QuotationStorageCandidate] = Field(default_factory=list)

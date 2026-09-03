@@ -81,6 +81,7 @@ def open_history_source(
         settings.quotation_database_path,
         request.source_file,
         request.source_sheet,
+        settings=settings,
     )
     if not known:
         known = session.scalar(
@@ -95,6 +96,7 @@ def open_history_source(
         source_path = resolve_quotation_source_path(
             request.source_file,
             settings.quotation_files_path,
+            settings=settings,
         )
         return open_excel_location(
             source_path,
@@ -117,6 +119,7 @@ def download_history_source(
         settings.quotation_database_path,
         request.source_file,
         request.source_sheet,
+        settings=settings,
     )
     if not known:
         known = session.scalar(
@@ -131,6 +134,7 @@ def download_history_source(
         source_path = resolve_quotation_source_path(
             request.source_file,
             settings.quotation_files_path,
+            settings=settings,
         )
         return FileResponse(
             source_path,
@@ -786,9 +790,12 @@ def history_candidates(
         settings.quotation_database_path,
         mail,
         scope=scope,
+        settings=settings,
     )
     if external_rows:
         return [HistoryCandidateOut(**row) for row in external_rows]
+    if settings.quotation_year_folders or settings.quotation_path_aliases:
+        return []
 
     # 이전 방식으로 가져온 내부 이력이 있는 설치 환경을 위한 호환 경로.
     results: list[HistoryCandidateOut] = []

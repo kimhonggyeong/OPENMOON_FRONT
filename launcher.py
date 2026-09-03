@@ -450,9 +450,15 @@ class LauncherWindow:
             "color": self.user_color,
         })
         profiled_url = f"{web_url}?{profile_query}"
-        self.action_button(buttons, "웹 열기", lambda: webbrowser.open(profiled_url), True).pack(side=LEFT, padx=7)
-        self.action_button(buttons, "공유 서버 종료" if self.is_heart_host else "서버 연결 종료", self.stop_servers).pack(side=LEFT, padx=7)
+        self.action_button(buttons, "웹 열기", lambda: webbrowser.open(profiled_url), True, width=12).pack(side=LEFT, padx=7)
+        if self.is_heart_host:
+            from backend.app.storage_dialog import show_storage_dialog
+            self.action_button(buttons, "저장소 설정", lambda: show_storage_dialog(self), width=12).pack(side=LEFT, padx=7)
+        self.action_button(buttons, "공유 서버 종료" if self.is_heart_host else "서버 연결 종료", self.stop_servers, width=14).pack(side=LEFT, padx=7)
         self.description("메일, 분석 결과, 품목 수정 내용과 하트 상태를 함께 사용합니다.").pack(pady=(28, 5))
+        if self.is_heart_host:
+            from backend.app.history_progress import HistoryProgress
+            HistoryProgress(self.page).pack(fill="x", padx=35, pady=5)
 
     def stop_servers(self) -> None:
         if self.stopping:

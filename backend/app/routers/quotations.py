@@ -152,11 +152,16 @@ def get_draft(draft_id: int, session: Session = Depends(get_db)):
 
 
 @router.get("/{draft_id}/file")
-def download_draft(draft_id: int, session: Session = Depends(get_db)):
+def download_draft(draft_id: int, session: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
     draft = session.get(QuotationDraft, draft_id)
     if not draft:
         raise HTTPException(404, "견적서를 찾을 수 없습니다.")
-    path = Path(draft.file_path)
+    from ..quotation_storage import relocated_path
+    from ..services.excel_open_service import resolve_quotation_source_path
+    try:
+        path = resolve_quotation_source_path(draft.file_path, settings.quotation_files_path, settings=settings)
+    except FileNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
     if not path.exists():
         raise HTTPException(404, "견적서 파일이 없습니다.")
     return FileResponse(path, filename=path.name)
@@ -296,7 +301,8 @@ def delete_draft(
     if not draft:
         raise HTTPException(404, "견적서를 찾을 수 없습니다.")
 
-    path = Path(draft.file_path).resolve()
+    from ..quotation_storage import relocated_path
+    path = relocated_path(settings, draft.file_path).resolve()
     generated_root = settings.generated_quotes_dir.resolve()
     quotation_root = settings.quotation_files_path.resolve()
     removable = False
