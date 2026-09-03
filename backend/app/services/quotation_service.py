@@ -312,69 +312,13 @@ def _canonical_customer_product_name(
     normalized_product: str | None = None,
     catalog_names: list[str] | None = None,
 ) -> str:
+    # 고객용 PDF에는 카탈로그 대표명으로 축약하지 않고 입력한 품목명을 그대로 보여준다.
     raw = (
         raw_name
         or ""
     ).strip()
 
-    normalized = (
-        normalized_product
-        or ""
-    ).strip()
-
-    # 분석/카탈로그 매칭 단계에서 이미 대표품목이 확정됐다면 우선 사용한다.
-    if (
-        normalized
-        and normalized != raw
-    ):
-        return normalized
-
-    if not raw:
-        return "품목"
-
-    names = (
-        catalog_names
-        if catalog_names is not None
-        else _catalog_product_names()
-    )
-
-    def compact(value: str) -> str:
-        return re.sub(
-            r"[^0-9A-Za-z가-힣]",
-            "",
-            value,
-        ).casefold()
-
-    raw_key = compact(raw)
-
-    # 정확히 카탈로그 품목명이면 그대로 유지.
-    for name in names:
-        if compact(name) == raw_key:
-            return name
-
-    # "친환경 현수막", "실내용 현수막"처럼 수식어가 붙은 경우
-    # 카탈로그의 대표 품목명이 원문 안에 있으면 대표명으로 축약한다.
-    contained = [
-        name
-        for name in names
-        if compact(name)
-        and compact(name) in raw_key
-    ]
-
-    if contained:
-        # 가장 구체적인 대표품목명을 우선.
-        return max(
-            contained,
-            key=lambda value: len(
-                compact(value)
-            ),
-        )
-
-    # 회사 요구사항의 대표 예시를 최종 안전망으로 처리.
-    if "현수막" in raw:
-        return "현수막"
-
-    return raw
+    return raw or "품목"
 
 
 CUSTOMER_PDF_EXPORT_SCRIPT = r"""
